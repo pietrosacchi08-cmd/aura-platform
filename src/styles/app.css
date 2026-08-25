@@ -1,0 +1,430 @@
+@import "tailwindcss";
+
+@theme {
+  --color-midnight: #0B0B0B;
+  --color-gold: #D4AF37;
+  --color-gold-light: #e0c45e;
+  --color-charcoal: #1A1A1A;
+  --color-border: #2A2A2A;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #A0A0A0;
+  --color-text-muted: #6B6B6B;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-midnight text-text-primary antialiased font-sans;
+  }
+
+  /* Custom scrollbar for luxury feel */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0b0b0b;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a3a;
+  }
+}
+
+@utility scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ── Agency Presets ──────────────────────────────────────────────── */
+
+/* Default — Sotheby's International Realty */
+.agency-sothebys {
+  --aura-accent: #D4AF37;
+  --aura-accent-light: #e0c45e;
+  --aura-accent-subtle: rgba(212, 175, 55, 0.15);
+  --aura-accent-glow: rgba(212, 175, 55, 0.3);
+  --aura-surface: #0B0B0B;
+  --aura-card: #1A1A1A;
+  --aura-border-accent: rgba(212, 175, 55, 0.3);
+}
+
+/* Engel & Völkers */
+.agency-evs {
+  --aura-accent: #C0C0C0;
+  --aura-accent-light: #D8D8D8;
+  --aura-accent-subtle: rgba(192, 192, 192, 0.12);
+  --aura-accent-glow: rgba(192, 192, 192, 0.25);
+  --aura-surface: #0B0B0B;
+  --aura-card: #1A1A1A;
+  --aura-border-accent: rgba(192, 192, 192, 0.25);
+}
+
+/* Lionard */
+.agency-lionard {
+  --aura-accent: #C9A84C;
+  --aura-accent-light: #D4B96A;
+  --aura-accent-subtle: rgba(201, 168, 76, 0.15);
+  --aura-accent-glow: rgba(201, 168, 76, 0.35);
+  --aura-surface: #0A1628;
+  --aura-card: #0F1D35;
+  --aura-border-accent: rgba(201, 168, 76, 0.3);
+}
+
+/* ── Animations ──────────────────────────────────────────────────── */
+
+@keyframes faceid-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 24px rgba(212, 175, 55, 0);
+  }
+}
+
+@keyframes faceid-pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(212, 175, 55, 0.4), 0 0 20px rgba(212, 175, 55, 0.2), 0 0 30px rgba(212, 175, 55, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 10px rgba(212, 175, 55, 0.1), 0 0 20px rgba(212, 175, 55, 0.05), 0 0 30px rgba(212, 175, 55, 0.03);
+  }
+}
+
+@keyframes faceid-ring-rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-down {
+  from {
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 500px;
+  }
+}
+
+.animate-faceid-pulse {
+  animation: faceid-pulse 2s ease-in-out infinite;
+}
+
+.animate-faceid-pulse-glow {
+  animation: faceid-pulse-glow 2.5s ease-in-out infinite;
+}
+
+.animate-faceid-ring {
+  animation: faceid-ring-rotate 3s linear infinite;
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.4s ease-out forwards;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.25s cubic-bezier(0.25, 0.8, 0.25, 1) forwards;
+}
+
+.animate-slide-down {
+  animation: slide-down 0.35s ease-out forwards;
+  overflow: hidden;
+}
+
+/* ── Agency Color Transition ──────────────────────────────────────── */
+
+.agency-transitioning {
+  transition: background-color 0.6s ease, border-color 0.6s ease;
+}
+
+/* ── Tab Transition ──────────────────────────────────────────────── */
+
+.tab-btn {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.tab-underline {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+/* ── Revenue Ledger Row ──────────────────────────────────────────── */
+
+.ledger-row {
+  transition: background-color 0.25s ease, border-left-color 0.25s ease;
+  border-left: 2px solid transparent;
+}
+
+.ledger-row:hover {
+  border-left-color: var(--aura-accent, #D4AF37);
+}
+
+/* ── Booking Modal Animations ─────────────────────────────────────── */
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(40px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes check-pop {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes escrow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 0 16px rgba(212, 175, 55, 0);
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-fade-out {
+  animation: fade-out 0.2s ease-out forwards;
+}
+
+.animate-check-pop {
+  animation: check-pop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-escrow-pulse {
+  animation: escrow-pulse 2s ease-in-out infinite;
+}
+
+/* ── Range Slider Styling ────────────────────────────────────────── */
+
+input[type="range"].luxury-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: #2A2A2A;
+  outline: none;
+}
+
+input[type="range"].luxury-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--aura-accent, #D4AF37);
+  cursor: pointer;
+  border: 2px solid #0B0B0B;
+  box-shadow: 0 0 8px var(--aura-accent-glow, rgba(212, 175, 55, 0.3));
+  transition: transform 0.15s ease;
+}
+
+input[type="range"].luxury-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+input[type="range"].luxury-slider::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--aura-accent, #D4AF37);
+  cursor: pointer;
+  border: 2px solid #0B0B0B;
+  box-shadow: 0 0 8px var(--aura-accent-glow, rgba(212, 175, 55, 0.3));
+}
+
+/* ── Toggle Switch ───────────────────────────────────────────────── */
+
+.toggle-track {
+  transition: background-color 0.3s ease;
+}
+
+.toggle-thumb {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── AI Loading: Gold Pulse Ring ─────────────────────────────────── */
+
+@keyframes ai-pulse-ring {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.5);
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 20px rgba(212, 175, 55, 0);
+    opacity: 0.7;
+    transform: scale(1.03);
+  }
+}
+
+@keyframes ai-pulse-inner {
+  0%, 100% {
+    box-shadow: 0 0 6px rgba(212, 175, 55, 0.4), 0 0 12px rgba(212, 175, 55, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 12px rgba(212, 175, 55, 0.6), 0 0 24px rgba(212, 175, 55, 0.3);
+  }
+}
+
+.animate-ai-pulse-ring {
+  animation: ai-pulse-ring 1.8s ease-in-out infinite;
+}
+
+.animate-ai-pulse-inner {
+  animation: ai-pulse-inner 1.8s ease-in-out infinite;
+}
+
+/* ── AI Loading: Status Text Pulse ────────────────────────────────── */
+
+@keyframes status-text-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.animate-status-pulse {
+  animation: status-text-pulse 1.5s ease-in-out infinite;
+}
+
+/* ── Typing Dots Bounce ──────────────────────────────────────────── */
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-4px); }
+}
+
+/* ── Response Fade In ────────────────────────────────────────────── */
+
+@keyframes response-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-response-in {
+  animation: response-fade-in 0.3s ease-out forwards;
+}
+
+/* ── Staggered Card Slide-In ─────────────────────────────────────── */
+
+@keyframes slide-up-staggered {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up-staggered {
+  opacity: 0;
+  animation: slide-up-staggered 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation-fill-mode: both;
+}
+
+/* ── Typewriter Cursor Blink ─────────────────────────────────────── */
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.typewriter-cursor {
+  display: inline;
+  animation: cursor-blink 0.7s ease-in-out infinite;
+  color: var(--aura-accent, #D4AF37);
+  font-weight: 200;
+}
+
+/* ── Gold Glow Hover ─────────────────────────────────────────────── */
+
+.gold-glow-hover:hover {
+  box-shadow: 0 0 30px var(--aura-accent-glow, rgba(212, 175, 55, 0.3));
+}
+
+/* ── Logo Glow Overlay ───────────────────────────────────────────── */
+
+.logo-glow-bg {
+  position: relative;
+}
+
+.logo-glow-bg::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 180px;
+  height: 80px;
+  transform: translate(-20%, -50%);
+  background: radial-gradient(ellipse at center, var(--aura-accent-glow, rgba(212,175,55,0.15)) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
