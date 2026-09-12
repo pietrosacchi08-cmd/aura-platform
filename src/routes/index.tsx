@@ -249,11 +249,35 @@ function Home() {
       { id: "tx-r02", service: "Yacht Day Trip", amount: 3200, auraFee: 96, agencyShare: 384, status: "pending" },
     ],
   });
-  const [tempByProperty, setTempByProperty] = useState<Record<string, number>>({
-    "villa-olmo": 22, "villa-bellagio": 21, "villa-rosa": 24,
+  const [tempByProperty, setTempByProperty] = useState<Record<string, number>>(() => {
+    const defaults: Record<string, number> = {
+      "villa-olmo": 22, "villa-bellagio": 21, "villa-rosa": 24,
+    };
+    try {
+      const stored = localStorage.getItem("aura-temp-by-property");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        for (const key of Object.keys(defaults)) {
+          if (typeof parsed[key] === "number") defaults[key] = parsed[key];
+        }
+      }
+    } catch { /* ignore */ }
+    return defaults;
   });
-  const [poolByProperty, setPoolByProperty] = useState<Record<string, boolean>>({
-    "villa-olmo": false, "villa-bellagio": true, "villa-rosa": true,
+  const [poolByProperty, setPoolByProperty] = useState<Record<string, boolean>>(() => {
+    const defaults: Record<string, boolean> = {
+      "villa-olmo": false, "villa-bellagio": true, "villa-rosa": true,
+    };
+    try {
+      const stored = localStorage.getItem("aura-pool-by-property");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        for (const key of Object.keys(defaults)) {
+          if (typeof parsed[key] === "boolean") defaults[key] = parsed[key];
+        }
+      }
+    } catch { /* ignore */ }
+    return defaults;
   });
 
   // Derive current values from activePropertyId
@@ -268,6 +292,16 @@ function Home() {
     try { localStorage.setItem("aura-tasks-by-property", JSON.stringify(tasksByProperty)); }
     catch { /* storage full */ }
   }, [tasksByProperty]);
+
+  // Persist estate temperature & pool state to localStorage (keyed by property)
+  useEffect(() => {
+    try { localStorage.setItem("aura-temp-by-property", JSON.stringify(tempByProperty)); }
+    catch { /* storage full */ }
+  }, [tempByProperty]);
+  useEffect(() => {
+    try { localStorage.setItem("aura-pool-by-property", JSON.stringify(poolByProperty)); }
+    catch { /* storage full */ }
+  }, [poolByProperty]);
 
   // Property-scoped setters
   const setActiveTasks = useCallback(
