@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { properties, type Property } from "../data/properties";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -43,50 +44,6 @@ interface ChatMessage {
   content: string;
   tasks?: TaskItem[];
 }
-
-interface Property {
-  id: string;
-  name: string;
-  location: string;
-  heroImage: string;
-  heroAlt: string;
-  bedrooms: number;
-  baths: number;
-  interior: string;
-  terrace: string;
-  defaultTemp: number;
-  defaultPool: boolean;
-}
-
-const properties: Property[] = [
-  {
-    id: "villa-olmo",
-    name: "Villa Olmo — Como",
-    location: "Via per Cernobbio 12, 22100 Como",
-    heroImage: "https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?fit=crop&w=800&q=80",
-    heroAlt: "Villa Olmo at dusk with lake view",
-    bedrooms: 7, baths: 6, interior: "520 m²", terrace: "120 m²",
-    defaultTemp: 22, defaultPool: false,
-  },
-  {
-    id: "villa-bellagio",
-    name: "Villa Bellagio — Lake Como",
-    location: "Via Paolo Carcano 5, 22021 Bellagio",
-    heroImage: "https://images.unsplash.com/photo-1613490493576-7fde63acd811?fit=crop&w=800&q=80",
-    heroAlt: "Villa Bellagio overlooking Lake Como",
-    bedrooms: 5, baths: 4, interior: "410 m²", terrace: "95 m²",
-    defaultTemp: 21, defaultPool: true,
-  },
-  {
-    id: "villa-rosa",
-    name: "Villa Rosa — Amalfi Coast",
-    location: "Via San Nicola 3, 84011 Amalfi",
-    heroImage: "https://images.unsplash.com/photo-1583608205776-bfd35f0d9f83?fit=crop&w=800&q=80",
-    heroAlt: "Villa Rosa perched on Amalfi cliffs",
-    bedrooms: 4, baths: 3, interior: "340 m²", terrace: "180 m²",
-    defaultTemp: 24, defaultPool: true,
-  },
-];
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -220,11 +177,9 @@ function Home() {
 
   // Property-scoped state (Record keyed by property id)
   const [tasksByProperty, setTasksByProperty] = useState<Record<string, TaskItem[]>>(() => {
-    const empty: Record<string, TaskItem[]> = {
-      "villa-olmo": [],
-      "villa-bellagio": [],
-      "villa-rosa": [],
-    };
+    const empty: Record<string, TaskItem[]> = Object.fromEntries(
+      properties.map((p) => [p.id, [] as TaskItem[]])
+    );
     try {
       const stored = localStorage.getItem("aura-tasks-by-property");
       if (stored) {
@@ -236,23 +191,29 @@ function Home() {
     } catch { /* ignore */ }
     return empty;
   });
-  const [revenueByProperty, setRevenueByProperty] = useState<Record<string, RevenueTransaction[]>>({
-    "villa-olmo": [
-      { id: "tx-001", service: "Yacht Charter", amount: 4500, auraFee: 135, agencyShare: 540, status: "approved" },
-      { id: "tx-002", service: "Chauffeur Service", amount: 800, auraFee: 24, agencyShare: 96, status: "approved" },
-    ],
-    "villa-bellagio": [
-      { id: "tx-b01", service: "Private Catering", amount: 2400, auraFee: 72, agencyShare: 288, status: "approved" },
-    ],
-    "villa-rosa": [
-      { id: "tx-r01", service: "Aviation Charter", amount: 12000, auraFee: 360, agencyShare: 1440, status: "approved" },
-      { id: "tx-r02", service: "Yacht Day Trip", amount: 3200, auraFee: 96, agencyShare: 384, status: "pending" },
-    ],
+  const [revenueByProperty, setRevenueByProperty] = useState<
+    Record<string, RevenueTransaction[]>
+  >(() => {
+    const seed: Record<string, RevenueTransaction[]> = Object.fromEntries(
+      properties.map((p) => [p.id, [] as RevenueTransaction[]])
+    );
+    seed["ref-6291"] = [
+      { id: "tx-6291-001", service: "Yacht Charter", amount: 4500, auraFee: 135, agencyShare: 540, status: "approved" },
+      { id: "tx-6291-002", service: "Chauffeur Service", amount: 800, auraFee: 24, agencyShare: 96, status: "approved" },
+    ];
+    seed["ref-14828"] = [
+      { id: "tx-14828-001", service: "Private Catering", amount: 2400, auraFee: 72, agencyShare: 288, status: "approved" },
+    ];
+    seed["ref-15864"] = [
+      { id: "tx-15864-001", service: "Aviation Charter", amount: 12000, auraFee: 360, agencyShare: 1440, status: "approved" },
+      { id: "tx-15864-002", service: "Yacht Day Trip", amount: 3200, auraFee: 96, agencyShare: 384, status: "pending" },
+    ];
+    return seed;
   });
   const [tempByProperty, setTempByProperty] = useState<Record<string, number>>(() => {
-    const defaults: Record<string, number> = {
-      "villa-olmo": 22, "villa-bellagio": 21, "villa-rosa": 24,
-    };
+    const defaults: Record<string, number> = Object.fromEntries(
+      properties.map((p) => [p.id, p.defaultTemp])
+    );
     try {
       const stored = localStorage.getItem("aura-temp-by-property");
       if (stored) {
@@ -265,9 +226,9 @@ function Home() {
     return defaults;
   });
   const [poolByProperty, setPoolByProperty] = useState<Record<string, boolean>>(() => {
-    const defaults: Record<string, boolean> = {
-      "villa-olmo": false, "villa-bellagio": true, "villa-rosa": true,
-    };
+    const defaults: Record<string, boolean> = Object.fromEntries(
+      properties.map((p) => [p.id, p.defaultPool])
+    );
     try {
       const stored = localStorage.getItem("aura-pool-by-property");
       if (stored) {
@@ -382,6 +343,9 @@ function Home() {
       <Header
         agency={currentAgency}
         property={activeProperty}
+        properties={properties}
+        activePropertyId={activePropertyId}
+        onSwitchProperty={handleSwitchProperty}
         onToggleAdmin={() => setShowAdminPanel((p) => !p)}
         showAdminPanel={showAdminPanel}
       />
@@ -431,61 +395,99 @@ function Home() {
 function Header({
   agency,
   property,
+  properties: propertyList,
+  activePropertyId,
+  onSwitchProperty,
   onToggleAdmin,
   showAdminPanel,
 }: {
   agency: AgencyInfo;
   property: Property;
+  properties: Property[];
+  activePropertyId: string;
+  onSwitchProperty: (id: string) => void;
   onToggleAdmin: () => void;
   showAdminPanel: boolean;
 }) {
   return (
     <header className="border-b border-border px-6 py-8 md:px-12 lg:px-24">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
         <div className="flex items-baseline gap-3 logo-glow-bg">
           <h1
-            className="relative z-10 text-4xl font-light tracking-[0.2em] md:text-5xl"
+            className="relative z-10 text-lg font-light tracking-[0.18em] sm:text-xl md:text-2xl lg:text-3xl"
             style={{ color: "var(--aura-accent, #D4AF37)" }}
           >
-            AURA
+            <span>AURA</span>
+            <span className="mx-2 text-[0.75em] opacity-60" aria-hidden="true">×</span>
+            <span>LIONARD Luxury Real Estate</span>
           </h1>
           <span
-            className="relative z-10 h-2 w-2 rounded-full"
+            className="relative z-10 h-2 w-2 shrink-0 rounded-full"
             style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
             aria-hidden="true"
           />
         </div>
-
-        {/* Settings gear */}
-        <button
-          onClick={onToggleAdmin}
-          className={`
-            relative flex h-10 w-10 items-center justify-center rounded-full
-            border transition-all duration-300
-            ${
-              showAdminPanel
-                ? "border-[var(--aura-accent,#D4AF37)] text-[var(--aura-accent,#D4AF37)]"
-                : "border-border text-text-muted hover:border-text-secondary hover:text-text-secondary"
-            }
-          `}
-          aria-label="Agency Admin Settings"
-          title="Agency Admin Settings"
-        >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="transition-transform duration-500 hover:rotate-90"
+        <div className="flex items-center gap-3">
+          {/* Property switcher */}
+          <div className="relative">
+            <select
+              aria-label="Switch active property"
+              value={activePropertyId}
+              onChange={(e) => onSwitchProperty(e.target.value)}
+              className="cursor-pointer appearance-none rounded-full border border-border bg-charcoal py-2 pl-4 pr-9 text-xs font-light tracking-[0.12em] text-text-secondary transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-text-primary focus:outline-none focus-visible:border-[var(--aura-accent,#D4AF37)]"
+            >
+              {propertyList.map((p) => (
+                <option key={p.id} value={p.id} className="bg-charcoal text-text-primary">
+                  {p.id === activePropertyId ? `✓ ${p.name}` : p.name}
+                </option>
+              ))}
+            </select>
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-text-muted"
+              aria-hidden="true"
+            >
+              <path d="M2 4.5L6 8.5L10 4.5" />
+            </svg>
+          </div>
+          {/* Settings gear */}
+          <button
+            onClick={onToggleAdmin}
+            className={`
+              relative flex h-10 w-10 items-center justify-center rounded-full
+              border transition-all duration-300
+              ${
+                showAdminPanel
+                  ? "border-[var(--aura-accent,#D4AF37)] text-[var(--aura-accent,#D4AF37)]"
+                  : "border-border text-text-muted hover:border-text-secondary hover:text-text-secondary"
+              }
+            `}
+            aria-label="Agency Admin Settings"
+            title="Agency Admin Settings"
           >
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="transition-transform duration-500 hover:rotate-90"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <p className="mt-2 font-light text-text-muted">
@@ -754,7 +756,11 @@ function TabPanels({
               ) : tab.id === "staff" ? (
                 <StaffPanel tasks={tasks} setTasks={setTasks} onEstateTempChange={setEstateTemp} onPoolToggle={setPoolActive} />
               ) : tab.id === "concierge" ? (
-                <ConciergePanel onAddTask={onAddTask} onRevenueAdd={onRevenueAdd} />
+                <ConciergePanel
+                  onAddTask={onAddTask}
+                  onRevenueAdd={onRevenueAdd}
+                  activeProperty={activeProperty}
+                />
               ) : tab.id === "revenue" ? (
                 <RevenuePanel revenueTransactions={revenueTransactions} />
               ) : (
@@ -1117,11 +1123,12 @@ function SecurityPerimeter({
 }) {
   const [showFaceID, setShowFaceID] = useState(false);
   const [showPropertySelect, setShowPropertySelect] = useState(false);
-  const [scanTimes, setScanTimes] = useState<Record<string, number>>({
-    "villa-olmo": Date.now(),
-    "villa-bellagio": Date.now() - 1000 * 60 * 4, // 4 min ago
-    "villa-rosa": Date.now() - 1000 * 60 * 12, // 12 min ago
-  });
+  // Staggered per-property perimeter scan times (0 / 4 / 12 min ago)
+  const [scanTimes, setScanTimes] = useState<Record<string, number>>(() =>
+    Object.fromEntries(
+      properties.map((p, i) => [p.id, Date.now() - i * 1000 * 60 * 4])
+    )
+  );
   const [now, setNow] = useState(Date.now());
   const [visited, setVisited] = useState<Set<string>>(new Set([activePropertyId]));
 
@@ -3131,7 +3138,15 @@ function TaskCard({
 // CONCIERGE PANEL — Luxury Marketplace + Booking Escrow
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function ConciergePanel({ onAddTask, onRevenueAdd }: { onAddTask: (task: TaskItem) => void; onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void }) {
+function ConciergePanel({
+  onAddTask,
+  onRevenueAdd,
+  activeProperty,
+}: {
+  onAddTask: (task: TaskItem) => void;
+  onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void;
+  activeProperty: Property;
+}) {
   const [bookingService, setBookingService] = useState<ConciergeService | null>(null);
 
   return (
@@ -3169,6 +3184,7 @@ function ConciergePanel({ onAddTask, onRevenueAdd }: { onAddTask: (task: TaskIte
       {bookingService && (
         <BookingModal
           service={bookingService}
+          activeProperty={activeProperty}
           onClose={() => setBookingService(null)}
           onAddTask={onAddTask}
           onRevenueAdd={onRevenueAdd}
@@ -3334,11 +3350,13 @@ function ServiceIcon({ type }: { type: ConciergeService["icon"] }) {
 
 function BookingModal({
   service,
+  activeProperty,
   onClose,
   onAddTask,
   onRevenueAdd,
 }: {
   service: ConciergeService;
+  activeProperty: Property;
   onClose: () => void;
   onAddTask: (task: TaskItem) => void;
   onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void;
@@ -3438,7 +3456,9 @@ function BookingModal({
         style={{ backgroundColor: "var(--aura-card, #1A1A1A)" }}
       >
         {stage === 1 && <Stage1Securing serviceName={service.title} />}
-        {stage === 2 && <Stage2Escrow service={service} />}
+        {stage === 2 && (
+          <Stage2Escrow service={service} activeProperty={activeProperty} />
+        )}
         {stage === 3 && isPriced && (
           <Stage3Checkout
             service={service}
@@ -3449,7 +3469,11 @@ function BookingModal({
           />
         )}
         {stage === 3 && !isPriced && (
-          <Stage3Requested service={service} onClose={handleClose} />
+          <Stage3Requested
+            service={service}
+            activeProperty={activeProperty}
+            onClose={handleClose}
+          />
         )}
       </div>
     </div>
@@ -3509,7 +3533,13 @@ function Stage1Securing({ serviceName }: { serviceName: string }) {
 
 // ── Stage 2: Escrow Details ───────────────────────────────────────────────────
 
-function Stage2Escrow({ service }: { service: ConciergeService }) {
+function Stage2Escrow({
+  service,
+  activeProperty,
+}: {
+  service: ConciergeService;
+  activeProperty: Property;
+}) {
   const isPriced = service.priceValue !== null;
   const amount = service.priceValue ?? 0;
   const auraFee = Math.round(amount * 0.03);
@@ -3523,6 +3553,10 @@ function Stage2Escrow({ service }: { service: ConciergeService }) {
       >
         Escrow Details
       </h3>
+      {/* Property the request is raised for */}
+      <p className="text-center text-[11px] font-light tracking-[0.15em] text-text-muted">
+        Richiesta per Villa {activeProperty.refCode}
+      </p>
 
       {/* Transaction Amount */}
       <div className="rounded-xl border border-border p-4">
@@ -3800,9 +3834,11 @@ function Stage3Checkout({
 
 function Stage3Requested({
   service,
+  activeProperty,
   onClose,
 }: {
   service: ConciergeService;
+  activeProperty: Property;
   onClose: () => void;
 }) {
   return (
@@ -3835,6 +3871,10 @@ function Stage3Requested({
         </p>
       </div>
 
+      {/* Property the request is raised for */}
+      <p className="text-[11px] font-light tracking-[0.15em] text-text-muted">
+        Richiesta per Villa {activeProperty.refCode}
+      </p>
       <div
         className="w-full rounded-xl border border-border/40 p-4"
         style={{ backgroundColor: "rgba(11,11,11,0.6)" }}
