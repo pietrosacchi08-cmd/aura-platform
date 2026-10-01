@@ -167,7 +167,7 @@ export const Route = createFileRoute("/")({
 
 function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("estate");
-  const [agencyPreset, setAgencyPreset] = useState<AgencyPreset>("sothebys");
+  const [agencyPreset, setAgencyPreset] = useState<AgencyPreset>("lionard");
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -198,15 +198,17 @@ function Home() {
       properties.map((p) => [p.id, [] as RevenueTransaction[]])
     );
     seed["ref-6291"] = [
-      { id: "tx-6291-001", service: "Yacht Charter", amount: 4500, auraFee: 135, agencyShare: 540, status: "approved" },
-      { id: "tx-6291-002", service: "Chauffeur Service", amount: 800, auraFee: 24, agencyShare: 96, status: "approved" },
+      { id: "tx-6291-001", service: "Yacht Charter", amount: 6500, auraFee: 195, agencyShare: 780, status: "approved" },
+      { id: "tx-6291-002", service: "Private Chef", amount: 1100, auraFee: 33, agencyShare: 132, status: "approved" },
+      { id: "tx-6291-003", service: "Chauffeur Service", amount: 800, auraFee: 24, agencyShare: 96, status: "approved" },
     ];
     seed["ref-14828"] = [
-      { id: "tx-14828-001", service: "Private Catering", amount: 2400, auraFee: 72, agencyShare: 288, status: "approved" },
+      { id: "tx-14828-001", service: "Wine Tasting & Tour", amount: 2200, auraFee: 66, agencyShare: 264, status: "approved" },
+      { id: "tx-14828-002", service: "Helicopter Transfer", amount: 4000, auraFee: 120, agencyShare: 480, status: "approved" },
     ];
     seed["ref-15864"] = [
-      { id: "tx-15864-001", service: "Aviation Charter", amount: 12000, auraFee: 360, agencyShare: 1440, status: "approved" },
-      { id: "tx-15864-002", service: "Yacht Day Trip", amount: 3200, auraFee: 96, agencyShare: 384, status: "pending" },
+      { id: "tx-15864-001", service: "Spa & Wellness Treatment", amount: 1600, auraFee: 48, agencyShare: 192, status: "approved" },
+      { id: "tx-15864-002", service: "Private Chef", amount: 2500, auraFee: 75, agencyShare: 300, status: "approved" },
     ];
     return seed;
   });
@@ -762,7 +764,7 @@ function TabPanels({
                   activeProperty={activeProperty}
                 />
               ) : tab.id === "revenue" ? (
-                <RevenuePanel revenueTransactions={revenueTransactions} />
+                <RevenuePanel revenueTransactions={revenueTransactions} activeProperty={activeProperty} />
               ) : (
                 <PlaceholderPanel
                   icon={tab.icon}
@@ -961,7 +963,7 @@ function HeroPropertyCard({ property }: { property: Property }) {
             <span className="text-border">|</span>
             <StatItem label="Interior" value={property.interior} />
             <span className="text-border">|</span>
-            <StatItem label="Terrace" value={property.terrace} />
+            <StatItem label={property.terraceLabel ?? "Terrace"} value={property.terrace} />
           </div>
         </div>
 
@@ -3937,7 +3939,13 @@ function formatRelativeTime(timestamp: number): string {
   return `Today at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-function RevenuePanel({ revenueTransactions }: { revenueTransactions: RevenueTransaction[] }) {
+function RevenuePanel({
+  revenueTransactions,
+  activeProperty,
+}: {
+  revenueTransactions: RevenueTransaction[];
+  activeProperty: Property;
+}) {
   const totalClientSpend = revenueTransactions.reduce((sum, t) => sum + t.amount, 0);
   const totalPlatformRevenue = revenueTransactions.filter((t) => t.status === "approved").reduce((sum, t) => sum + t.auraFee, 0);
   const totalAuraFees = revenueTransactions.reduce((sum, t) => sum + t.auraFee, 0);
@@ -3945,7 +3953,7 @@ function RevenuePanel({ revenueTransactions }: { revenueTransactions: RevenueTra
   const revenueStats: RevenueStat[] = [
     { label: "Total Client Spend via App", value: formatCurrency(totalClientSpend), subLabel: "Current quarter" },
     { label: "Agency Net Commissions", value: formatCurrency(totalAgencyCommissions), subLabel: "12% Avg Share" },
-    { label: "Active Premium Subscriptions", value: "€30,000.00/yr", subLabel: "15 Properties" },
+    { label: "Subscriptions / Fee", value: "€2,000.00/yr", subLabel: "1 Property" },
   ];
 
   return (
@@ -4201,7 +4209,7 @@ function RevenuePanel({ revenueTransactions }: { revenueTransactions: RevenueTra
             <p className="text-xs font-light leading-relaxed text-text-muted">
               Based on {formatCurrency(totalClientSpend)} in client spend
               <br />
-              across 15 active properties
+              Data for {activeProperty.refCode} — {activeProperty.name}
             </p>
           </div>
         </div>

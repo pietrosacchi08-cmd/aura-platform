@@ -36,6 +36,8 @@ export interface Property {
   interior: string;
   /** Exterior / terrace surface, e.g. "6.800 mq" (kept for existing UI). */
   terrace: string;
+  /** Optional label override for the terrace stat (e.g. "Grounds" for land lots). */
+  terraceLabel?: string;
   /** Initial climate setpoint for the estate tab. */
   defaultTemp: number;
   /** Initial pool state for the estate tab. */
@@ -106,7 +108,8 @@ export const properties: Property[] = [
     bedrooms: 5,
     baths: 4,
     interior: "500 mq",
-    terrace: "3,245 Ha",
+    terrace: "3,25 Ha",
+    terraceLabel: "Grounds",
     defaultTemp: 21,
     defaultPool: true,
   },
@@ -127,13 +130,13 @@ export const properties: Property[] = [
       "Accesso pedonale diretto al centro di Pietrasanta",
     ],
     heroImage:
-      "https://images.unsplash.com/photo-1554068865-24cecd4e34b8?auto=format&fit=crop&w=1200&q=80",
-    heroAlt: "Private tennis court of the villa in Pietrasanta",
-    gallery: [
-      "https://images.unsplash.com/photo-1554068865-24cecd4e34b8?auto=format&fit=crop&w=1200&q=80",
       "https://images.unsplash.com/photo-1571896349842-33c89424de2d?auto=format&fit=crop&w=1200&q=80",
-      "https://images.unsplash.com/photo-1622279457486-62dcc4a431d6?auto=format&fit=crop&w=1200&q=80",
+    heroAlt: "Panoramic sea-view terraces of the villa in Pietrasanta",
+    gallery: [
+      "https://images.unsplash.com/photo-1571896349842-33c89424de2d?auto=format&fit=crop&w=1200&q=80",
       "https://images.unsplash.com/photo-1512917774080-9991f1c4c750?auto=format&fit=crop&w=1200&q=80",
+      "https://images.unsplash.com/photo-1554068865-24cecd4e34b8?auto=format&fit=crop&w=1200&q=80",
+      "https://images.unsplash.com/photo-1622279457486-62dcc4a431d6?auto=format&fit=crop&w=1200&q=80",
       "https://images.unsplash.com/photo-1585320806297-9794b3e4eeae?auto=format&fit=crop&w=1200&q=80",
     ],
     bedrooms: 4,
