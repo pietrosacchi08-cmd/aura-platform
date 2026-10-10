@@ -38,10 +38,6 @@ export interface Property {
   terrace: string;
   /** Optional label override for the terrace stat (e.g. "Grounds" for land lots). */
   terraceLabel?: string;
-  /** Initial climate setpoint for the estate tab. */
-  defaultTemp: number;
-  /** Initial pool state for the estate tab. */
-  defaultPool: boolean;
 }
 
 export const properties: Property[] = [
@@ -75,8 +71,6 @@ export const properties: Property[] = [
     baths: 7,
     interior: "900 mq",
     terrace: "6.800 mq",
-    defaultTemp: 22,
-    defaultPool: true,
   },
   {
     id: "ref-14828",
@@ -110,8 +104,6 @@ export const properties: Property[] = [
     interior: "500 mq",
     terrace: "3,25 Ha",
     terraceLabel: "Grounds",
-    defaultTemp: 21,
-    defaultPool: true,
   },
   {
     id: "ref-15864",
@@ -143,7 +135,5 @@ export const properties: Property[] = [
     baths: 3,
     interior: "290 mq",
     terrace: "5.000 mq",
-    defaultTemp: 24,
-    defaultPool: true,
   },
 ];
