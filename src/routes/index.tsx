@@ -2,12 +2,17 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { properties, type Property } from "../data/properties";
+import {
+  agencyConfig,
+  conciergeImages,
+  conciergeServices,
+  subscriptionPrice,
+  type ConciergeService,
+} from "../data/config";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type Tab = "estate" | "staff" | "concierge" | "revenue";
-type AgencyPreset = "sothebys" | "evs" | "lionard";
-type StaffViewMode = "owner" | "staff";
+type Tab = "concierge" | "services" | "staff" | "revenue";
 
 interface TabDef {
   id: Tab;
@@ -18,14 +23,6 @@ interface TabDef {
 interface TabContent {
   title: string;
   subtitle: string;
-}
-
-interface AgencyInfo {
-  id: AgencyPreset;
-  name: string;
-  subtitle: string;
-  className: string;
-  label: string;
 }
 
 interface TaskItem {
@@ -48,113 +45,29 @@ interface ChatMessage {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const tabs: TabDef[] = [
-  { id: "estate", label: "Estate", icon: "🏰" },
-  { id: "staff", label: "Staff", icon: "⚡" },
   { id: "concierge", label: "Concierge", icon: "✦" },
+  { id: "services", label: "Services", icon: "❖" },
+  { id: "staff", label: "Staff", icon: "⚡" },
   { id: "revenue", label: "Revenue", icon: "◆" },
 ];
 
 const tabContent: Record<Tab, TabContent> = {
-  estate: {
-    title: "Property Dashboard",
-    subtitle: "Smart Controls & Estate Overview",
-  },
-  staff: {
-    title: "AI Estate Manager",
-    subtitle: "Intelligent Staff Automation",
-  },
   concierge: {
     title: "Luxury Concierge",
+    subtitle: "Your Executive Director, always on duty",
+  },
+  services: {
+    title: "Concierge Services",
     subtitle: "Curated Services Marketplace",
+  },
+  staff: {
+    title: "Staff Operations",
+    subtitle: "AI-Generated Task Automation",
   },
   revenue: {
     title: "Revenue Analytics",
     subtitle: "Agency Performance Insights",
   },
-};
-
-const agencyPresets: AgencyInfo[] = [
-  {
-    id: "sothebys",
-    name: "Sotheby's International Realty",
-    subtitle: "Jet-Black & Gold",
-    className: "agency-sothebys",
-    label: "Sotheby's Custom",
-  },
-  {
-    id: "evs",
-    name: "Engel & Völkers",
-    subtitle: "Matte Silver & Carbon",
-    className: "agency-evs",
-    label: "Engel & Völkers",
-  },
-  {
-    id: "lionard",
-    name: "Lionard Luxury Real Estate",
-    subtitle: "Royal Gold & Deep Navy",
-    className: "agency-lionard",
-    label: "Lionard",
-  },
-];
-
-// ── Concierge Service Data ────────────────────────────────────────────────────
-
-interface ConciergeService {
-  id: string;
-  title: string;
-  subtitle: string;
-  price: string;
-  priceValue: number | null;
-  cta: string;
-  icon: "yacht" | "chauffeur" | "catering" | "aviation";
-}
-
-const conciergeServices: ConciergeService[] = [
-  {
-    id: "yacht",
-    title: "Private Yacht Charter",
-    subtitle: "Daily cruises & superyacht tenders",
-    price: "From €4,500/day",
-    priceValue: 4500,
-    cta: "Request Captain",
-    icon: "yacht",
-  },
-  {
-    id: "chauffeur",
-    title: "Chauffeur & Luxury Fleet",
-    subtitle: "Airport transfers & private drivers",
-    price: "From €800/day",
-    priceValue: 800,
-    cta: "Book Driver",
-    icon: "chauffeur",
-  },
-  {
-    id: "catering",
-    title: "Michelin-Starred Catering",
-    subtitle: "In-villa private chef & staff",
-    price: "Custom Quote",
-    priceValue: null,
-    cta: "Book Chef",
-    icon: "catering",
-  },
-  {
-    id: "aviation",
-    title: "Aviation & Private Jets",
-    subtitle: "Global charter flights on-demand",
-    price: "On Request",
-    priceValue: null,
-    cta: "Request Flight",
-    icon: "aviation",
-  },
-];
-
-// ── Concierge Image URLs ──────────────────────────────────────────────────────
-
-const conciergeImages: Record<ConciergeService["icon"], string> = {
-  yacht: "https://images.unsplash.com/photo-1569263979104-865ab7cd8d13?auto=format&fit=crop&w=1200&q=80",
-  chauffeur: "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?fit=crop&w=400&q=80",
-  catering: "https://images.unsplash.com/photo-1414235077428-338989a2e8c0?fit=crop&w=400&q=80",
-  aviation: "https://images.unsplash.com/photo-1540962351504-03099e0a754b?fit=crop&w=400&q=80",
 };
 
 // ── Route ────────────────────────────────────────────────────────────────────
@@ -166,10 +79,7 @@ export const Route = createFileRoute("/")({
 // ── Home ─────────────────────────────────────────────────────────────────────
 
 function Home() {
-  const [activeTab, setActiveTab] = useState<Tab>("estate");
-  const [agencyPreset, setAgencyPreset] = useState<AgencyPreset>("lionard");
-  const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>("concierge");
   const [toast, setToast] = useState<string | null>(null);
 
   const DEFAULT_PROPERTY = properties[0];
@@ -212,59 +122,16 @@ function Home() {
     ];
     return seed;
   });
-  const [tempByProperty, setTempByProperty] = useState<Record<string, number>>(() => {
-    const defaults: Record<string, number> = Object.fromEntries(
-      properties.map((p) => [p.id, p.defaultTemp])
-    );
-    try {
-      const stored = localStorage.getItem("aura-temp-by-property");
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        for (const key of Object.keys(defaults)) {
-          if (typeof parsed[key] === "number") defaults[key] = parsed[key];
-        }
-      }
-    } catch { /* ignore */ }
-    return defaults;
-  });
-  const [poolByProperty, setPoolByProperty] = useState<Record<string, boolean>>(() => {
-    const defaults: Record<string, boolean> = Object.fromEntries(
-      properties.map((p) => [p.id, p.defaultPool])
-    );
-    try {
-      const stored = localStorage.getItem("aura-pool-by-property");
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        for (const key of Object.keys(defaults)) {
-          if (typeof parsed[key] === "boolean") defaults[key] = parsed[key];
-        }
-      }
-    } catch { /* ignore */ }
-    return defaults;
-  });
-
   // Derive current values from activePropertyId
   const activeProperty = properties.find((p) => p.id === activePropertyId)!;
   const tasks = tasksByProperty[activePropertyId];
   const revenueTransactions = revenueByProperty[activePropertyId];
-  const estateTemp = tempByProperty[activePropertyId];
-  const poolActive = poolByProperty[activePropertyId];
 
   // Persist tasks to localStorage (keyed by property)
   useEffect(() => {
     try { localStorage.setItem("aura-tasks-by-property", JSON.stringify(tasksByProperty)); }
     catch { /* storage full */ }
   }, [tasksByProperty]);
-
-  // Persist estate temperature & pool state to localStorage (keyed by property)
-  useEffect(() => {
-    try { localStorage.setItem("aura-temp-by-property", JSON.stringify(tempByProperty)); }
-    catch { /* storage full */ }
-  }, [tempByProperty]);
-  useEffect(() => {
-    try { localStorage.setItem("aura-pool-by-property", JSON.stringify(poolByProperty)); }
-    catch { /* storage full */ }
-  }, [poolByProperty]);
 
   // Property-scoped setters
   const setActiveTasks = useCallback(
@@ -278,16 +145,6 @@ function Home() {
         return { ...prev, [activePropertyId]: next };
       });
     },
-    [activePropertyId]
-  );
-
-  const setActiveEstateTemp = useCallback(
-    (t: number) => setTempByProperty((prev) => ({ ...prev, [activePropertyId]: t })),
-    [activePropertyId]
-  );
-
-  const setActivePool = useCallback(
-    (a: boolean) => setPoolByProperty((prev) => ({ ...prev, [activePropertyId]: a })),
     [activePropertyId]
   );
 
@@ -322,40 +179,21 @@ function Home() {
     }
   }, [activePropertyId]);
 
-  const currentAgency =
-    agencyPresets.find((a) => a.id === agencyPreset) ?? agencyPresets[0];
-
-  const handlePresetChange = useCallback((preset: AgencyPreset) => {
-    setIsTransitioning(true);
-    setAgencyPreset(preset);
-    // Remove transition class after the fade completes
-    setTimeout(() => setIsTransitioning(false), 600);
-  }, []);
-
   return (
     <div
-      className={`flex min-h-dvh flex-col text-text-primary ${currentAgency.className} ${
-        isTransitioning ? "agency-transitioning" : ""
-      }`}
-      style={{
-        backgroundColor: "var(--aura-surface, #0B0B0B)",
-        ...(isTransitioning ? { willChange: "background-color" } : {}),
-      }}
+      className="flex min-h-dvh flex-col text-text-primary"
+      style={
+        {
+          "--aura-accent": agencyConfig.primaryColor,
+          backgroundColor: "var(--aura-surface, #0B0B0B)",
+        } as React.CSSProperties
+      }
     >
       <Header
-        agency={currentAgency}
         property={activeProperty}
         properties={properties}
         activePropertyId={activePropertyId}
         onSwitchProperty={handleSwitchProperty}
-        onToggleAdmin={() => setShowAdminPanel((p) => !p)}
-        showAdminPanel={showAdminPanel}
-      />
-      <AgencyAdminPanel
-        presets={agencyPresets}
-        activePreset={agencyPreset}
-        onSelect={handlePresetChange}
-        visible={showAdminPanel}
       />
       <TabBar
         activeTab={activeTab}
@@ -370,15 +208,11 @@ function Home() {
         onSwitchProperty={handleSwitchProperty}
         tasks={tasks}
         setTasks={setActiveTasks}
-        estateTemp={estateTemp}
-        setEstateTemp={setActiveEstateTemp}
-        poolActive={poolActive}
-        setPoolActive={setActivePool}
         onAddTask={handleAddTask}
         revenueTransactions={revenueTransactions}
         onRevenueAdd={handleRevenueAdd}
       />
-      <Footer agency={currentAgency} />
+      <Footer />
 
       {/* Toast notification */}
       {toast && (
@@ -395,39 +229,42 @@ function Home() {
 // ── Header ───────────────────────────────────────────────────────────────────
 
 function Header({
-  agency,
   property,
   properties: propertyList,
   activePropertyId,
   onSwitchProperty,
-  onToggleAdmin,
-  showAdminPanel,
 }: {
-  agency: AgencyInfo;
   property: Property;
   properties: Property[];
   activePropertyId: string;
   onSwitchProperty: (id: string) => void;
-  onToggleAdmin: () => void;
-  showAdminPanel: boolean;
 }) {
   return (
     <header className="border-b border-border px-6 py-8 md:px-12 lg:px-24">
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
-        <div className="flex items-baseline gap-3 logo-glow-bg">
-          <h1
-            className="relative z-10 text-lg font-light tracking-[0.18em] sm:text-xl md:text-2xl lg:text-3xl"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            <span>AURA</span>
-            <span className="mx-2 text-[0.75em] opacity-60" aria-hidden="true">×</span>
-            <span>LIONARD Luxury Real Estate</span>
-          </h1>
+        <div className="flex items-center gap-3 logo-glow-bg">
+          {agencyConfig.logoUrl ? (
+            <img
+              src={agencyConfig.logoUrl}
+              alt={agencyConfig.agencyName}
+              className="relative z-10 h-8 w-auto md:h-10"
+            />
+          ) : (
+            <h1
+              className="relative z-10 text-lg font-light tracking-[0.18em] sm:text-xl md:text-2xl lg:text-3xl"
+              style={{ color: "var(--aura-accent, #D4AF37)" }}
+            >
+              AURA
+            </h1>
+          )}
           <span
-            className="relative z-10 h-2 w-2 shrink-0 rounded-full"
+            className="relative z-10 h-px w-6 shrink-0"
             style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
             aria-hidden="true"
           />
+          <span className="relative z-10 text-xs font-light tracking-[0.18em] text-text-secondary sm:text-sm">
+            {agencyConfig.agencyName}
+          </span>
         </div>
         <div className="flex items-center gap-3">
           {/* Property switcher */}
@@ -459,50 +296,8 @@ function Header({
               <path d="M2 4.5L6 8.5L10 4.5" />
             </svg>
           </div>
-          {/* Settings gear */}
-          <button
-            onClick={onToggleAdmin}
-            className={`
-              relative flex h-10 w-10 items-center justify-center rounded-full
-              border transition-all duration-300
-              ${
-                showAdminPanel
-                  ? "border-[var(--aura-accent,#D4AF37)] text-[var(--aura-accent,#D4AF37)]"
-                  : "border-border text-text-muted hover:border-text-secondary hover:text-text-secondary"
-              }
-            `}
-            aria-label="Agency Admin Settings"
-            title="Agency Admin Settings"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="transition-transform duration-500 hover:rotate-90"
-            >
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </button>
         </div>
       </div>
-
-      <p className="mt-2 font-light text-text-muted">
-        <span className="text-sm tracking-wide">
-          Exclusive Experience curated by{" "}
-        </span>
-        <span
-          className="text-sm font-normal transition-colors duration-500"
-          style={{ color: "var(--aura-accent-light, #e0c45e)" }}
-        >
-          {agency.name}
-        </span>
-      </p>
 
       <p className="mt-2 flex items-center gap-2 text-xs font-light tracking-[0.15em] text-text-secondary">
         <span
@@ -515,116 +310,6 @@ function Header({
         </span>
       </p>
     </header>
-  );
-}
-
-// ── Agency Admin Panel ───────────────────────────────────────────────────────
-
-function AgencyAdminPanel({
-  presets,
-  activePreset,
-  onSelect,
-  visible,
-}: {
-  presets: AgencyInfo[];
-  activePreset: AgencyPreset;
-  onSelect: (preset: AgencyPreset) => void;
-  visible: boolean;
-}) {
-  if (!visible) return null;
-
-  return (
-    <div className="animate-slide-down border-b border-border">
-      <div className="px-6 py-6 md:px-12 lg:px-24">
-        <div className="mb-4 flex items-center gap-2">
-          <span
-            className="text-xs font-medium uppercase tracking-[0.15em]"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            Agency Identity
-          </span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
-        <p className="mb-5 text-xs font-light text-text-muted">
-          Select a white-label preset to update the platform branding in
-          real-time.
-        </p>
-
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {presets.map((preset) => {
-            const isActive = activePreset === preset.id;
-            return (
-              <button
-                key={preset.id}
-                onClick={() => onSelect(preset.id)}
-                className={`
-                  group relative overflow-hidden rounded-xl border p-5 text-left
-                  transition-all duration-300
-                  ${
-                    isActive
-                      ? "border-[var(--aura-accent,#D4AF37)] bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))]"
-                      : "border-border bg-charcoal hover:border-text-secondary"
-                  }
-                `}
-              >
-                {/* Preview swatch */}
-                <div className="mb-4 flex items-center gap-2">
-                  <div
-                    className="h-3 w-3 rounded-full"
-                    style={{
-                      backgroundColor:
-                        preset.id === "sothebys"
-                          ? "#D4AF37"
-                          : preset.id === "evs"
-                            ? "#C0C0C0"
-                            : "#C9A84C",
-                    }}
-                  />
-                  <div
-                    className="h-3 w-8 rounded-full opacity-60"
-                    style={{
-                      backgroundColor:
-                        preset.id === "lionard" ? "#0A1628" : "#0B0B0B",
-                    }}
-                  />
-                </div>
-
-                <h3
-                  className={`text-sm font-medium tracking-wide transition-colors duration-300 ${
-                    isActive
-                      ? "text-[var(--aura-accent,#D4AF37)]"
-                      : "text-text-primary"
-                  }`}
-                >
-                  {preset.label}
-                </h3>
-                <p className="mt-1 text-xs font-light text-text-muted">
-                  {preset.subtitle}
-                </p>
-
-                {/* Active indicator */}
-                {isActive && (
-                  <div className="absolute right-3 top-3 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--aura-accent,#D4AF37)]">
-                    <svg
-                      width="10"
-                      height="10"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="#0B0B0B"
-                      strokeWidth="3"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  </div>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -710,10 +395,6 @@ function TabPanels({
   onSwitchProperty,
   tasks,
   setTasks,
-  estateTemp,
-  setEstateTemp,
-  poolActive,
-  setPoolActive,
   onAddTask,
   revenueTransactions,
   onRevenueAdd,
@@ -725,10 +406,6 @@ function TabPanels({
   onSwitchProperty: (id: string) => void;
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
-  estateTemp: number;
-  setEstateTemp: (t: number) => void;
-  poolActive: boolean;
-  setPoolActive: (a: boolean) => void;
   onAddTask: (task: TaskItem) => void;
   revenueTransactions: RevenueTransaction[];
   onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void;
@@ -753,16 +430,16 @@ function TabPanels({
                 }
               `}
             >
-              {tab.id === "estate" ? (
-                <EstatePanel estateTemp={estateTemp} poolActive={poolActive} onTempChange={setEstateTemp} onPoolToggle={setPoolActive} onAddTask={(t) => setTasks(prev => [...prev, t])} activeProperty={activeProperty} properties={properties} activePropertyId={activePropertyId} onSwitchProperty={onSwitchProperty} />
-              ) : tab.id === "staff" ? (
-                <StaffPanel tasks={tasks} setTasks={setTasks} onEstateTempChange={setEstateTemp} onPoolToggle={setPoolActive} />
-              ) : tab.id === "concierge" ? (
-                <ConciergePanel
+              {tab.id === "concierge" ? (
+                <ConciergePanel tasks={tasks} setTasks={setTasks} />
+              ) : tab.id === "services" ? (
+                <ServicesPanel
                   onAddTask={onAddTask}
                   onRevenueAdd={onRevenueAdd}
                   activeProperty={activeProperty}
                 />
+              ) : tab.id === "staff" ? (
+                <StaffPanel tasks={tasks} setTasks={setTasks} />
               ) : tab.id === "revenue" ? (
                 <RevenuePanel revenueTransactions={revenueTransactions} activeProperty={activeProperty} />
               ) : (
@@ -825,549 +502,7 @@ function PlaceholderPanel({
     </div>
   );
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ESTATE PANEL — Property Dashboard + Smart Estate Controls
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function EstatePanel({
-  estateTemp, poolActive, onTempChange, onPoolToggle, onAddTask,
-  activeProperty, properties, activePropertyId, onSwitchProperty,
-}: {
-  estateTemp: number;
-  poolActive: boolean;
-  onTempChange: (t: number) => void;
-  onPoolToggle: (a: boolean) => void;
-  onAddTask: (t: TaskItem) => void;
-  activeProperty: Property;
-  properties: Property[];
-  activePropertyId: string;
-  onSwitchProperty: (id: string) => void;
-}) {
-  return (
-    <div className="space-y-8">
-      {/* Hero Property Card */}
-      <PropertyImagePlaceholder property={activeProperty} />
-      <HeroPropertyCard property={activeProperty} />
-
-      {/* Smart Estate Controls */}
-      <div className="rounded-2xl border border-border bg-charcoal p-8 md:p-10 lg:p-12">
-        <div className="mb-8">
-          <h3
-            className="text-xl font-light tracking-wide md:text-2xl"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            Smart Estate Control
-          </h3>
-          <p className="mt-1 text-sm font-light text-text-muted">
-            IoT Gateway — Real-time property monitoring &amp; automation
-          </p>
-        </div>
-
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          <ClimateControl temp={estateTemp} onTempChange={onTempChange} onAddTask={onAddTask} />
-          <PoolSpaToggle active={poolActive} onToggle={onPoolToggle} onAddTask={onAddTask} />
-          <SecurityPerimeter properties={properties} activePropertyId={activePropertyId} onSwitchProperty={onSwitchProperty} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Property Image (Hero) ────────────────────────────────────────────────────
-
-function PropertyImagePlaceholder({ property }: { property: Property }) {
-  return (
-    <div className="relative h-[200px] overflow-hidden rounded-2xl border border-border md:h-[280px]">
-      {/* Unsplash hero image */}
-      <img
-        src={property.heroImage}
-        alt={property.heroAlt}
-        className="absolute inset-0 h-full w-full object-cover"
-      />
-
-      {/* Dark gradient overlay — bottom to top for text readability */}
-      <div
-        className="absolute inset-0"
-        style={{
-          background: `
-            linear-gradient(to top, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.3) 40%, rgba(0,0,0,0.1) 100%)
-          `,
-        }}
-      />
-
-      {/* Subtle gold accent overlay */}
-      <div
-        className="absolute inset-0"
-        style={{
-          background: `
-            radial-gradient(ellipse at 30% 50%, var(--aura-accent-subtle, rgba(212,175,55,0.06)) 0%, transparent 60%)
-          `,
-        }}
-      />
-
-      {/* Property label overlay */}
-      <div className="absolute bottom-6 left-6 md:bottom-8 md:left-8">
-        <span
-          className="inline-block rounded-full px-3 py-1 text-[10px] font-medium uppercase tracking-[0.2em]"
-          style={{
-            backgroundColor: "var(--aura-accent-subtle, rgba(212,175,55,0.15))",
-            color: "var(--aura-accent, #D4AF37)",
-            border: "1px solid var(--aura-border-accent, rgba(212,175,55,0.3))",
-          }}
-        >
-          {property.name.split(" — ")[0]}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ── Hero Property Card ───────────────────────────────────────────────────────
-
-function HeroPropertyCard({ property }: { property: Property }) {
-  return (
-    <div
-      className="rounded-2xl border p-8 md:p-10 lg:p-12"
-      style={{
-        backgroundColor: "var(--aura-card, #1A1A1A)",
-        borderColor: "var(--aura-border-accent, rgba(212,175,55,0.3))",
-      }}
-    >
-      <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <h2 className="text-2xl font-light tracking-wide md:text-3xl lg:text-4xl">
-              {property.name}
-            </h2>
-            <span
-              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.15em]"
-              style={{
-                backgroundColor: "var(--aura-accent-subtle, rgba(212,175,55,0.15))",
-                color: "var(--aura-accent, #D4AF37)",
-              }}
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-[var(--aura-accent,#D4AF37)]" />
-              Active
-            </span>
-          </div>
-
-          <p className="text-sm font-light text-text-secondary">
-            {property.location}
-          </p>
-
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-2 text-sm font-light text-text-secondary">
-            <StatItem label="Bedrooms" value={String(property.bedrooms)} />
-            <span className="text-border">|</span>
-            <StatItem label="Baths" value={String(property.baths)} />
-            <span className="text-border">|</span>
-            <StatItem label="Interior" value={property.interior} />
-            <span className="text-border">|</span>
-            <StatItem label={property.terraceLabel ?? "Terrace"} value={property.terrace} />
-          </div>
-        </div>
-
-        {/* Decorative accent line */}
-        <div
-          className="hidden h-px w-16 md:block md:h-16 md:w-px"
-          style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
-          aria-hidden="true"
-        />
-      </div>
-    </div>
-  );
-}
-
-function StatItem({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="inline-flex items-baseline gap-1.5">
-      <span className="text-text-muted">{label}</span>
-      <span className="font-medium text-text-primary">{value}</span>
-    </span>
-  );
-}
-
-// ── Climate Control ──────────────────────────────────────────────────────────
-
-function ClimateControl({ temp, onTempChange, onAddTask }: { temp: number; onTempChange: (t: number) => void; onAddTask: (t: TaskItem) => void }) {
-
-  const pct = ((temp - 18) / (26 - 18)) * 100;
-
-  return (
-    <div
-      className="rounded-xl border border-border p-6 transition-colors duration-300 hover:border-[var(--aura-border-accent,rgba(212,175,55,0.3))] animate-slide-up-staggered gold-glow-hover"
-      style={{ backgroundColor: "var(--aura-card, #1A1A1A)", animationDelay: "0ms" }}
-    >
-      <h4 className="text-sm font-medium tracking-wide text-text-primary">
-        Climate Control
-      </h4>
-      <p className="mt-1 text-xs text-text-muted">Interior Ambient</p>
-
-      {/* Temperature display */}
-      <div className="mt-6 flex items-baseline gap-1">
-        <span
-          className="text-5xl font-light tracking-tight md:text-6xl"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          {temp}
-        </span>
-        <span className="text-2xl font-light text-text-muted">°C</span>
-      </div>
-
-      {/* Slider */}
-      <div className="mt-6 space-y-2">
-        <input
-          type="range"
-          min={18}
-          max={26}
-          value={temp}
-          onChange={(e) => {
-            const newTemp = Number(e.target.value);
-            onTempChange(newTemp);
-            onAddTask({
-              id: generateTaskId(),
-              module: "Climate Control",
-              description: `Guest set temperature to ${newTemp}°C`,
-              status: "pending",
-              createdAt: new Date().toLocaleTimeString(),
-            });
-          }}
-          className="luxury-slider w-full"
-          style={{
-            background: `linear-gradient(to right, var(--aura-accent, #D4AF37) 0%, var(--aura-accent, #D4AF37) ${pct}%, #2A2A2A ${pct}%, #2A2A2A 100%)`,
-          }}
-          aria-label="Temperature control"
-        />
-        <div className="flex justify-between text-[10px] font-light text-text-muted">
-          <span>18°C</span>
-          <span>26°C</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Pool & Spa Toggle ────────────────────────────────────────────────────────
-
-function PoolSpaToggle({ active, onToggle, onAddTask }: { active: boolean; onToggle: (a: boolean) => void; onAddTask: (t: TaskItem) => void }) {
-
-  return (
-    <div
-      className="rounded-xl border border-border p-6 transition-colors duration-300 hover:border-[var(--aura-border-accent,rgba(212,175,55,0.3))] animate-slide-up-staggered gold-glow-hover"
-      style={{ backgroundColor: "var(--aura-card, #1A1A1A)", animationDelay: "100ms" }}
-    >
-      <h4 className="text-sm font-medium tracking-wide text-text-primary">
-        Pool &amp; Spa
-      </h4>
-      <p className="mt-1 text-xs text-text-muted">
-        {active ? "Heating system active" : "Heating system idle"}
-      </p>
-
-      {/* Toggle */}
-      <div className="mt-6 flex items-center gap-4">
-        <button
-          onClick={() => {
-            const newActive = !active;
-            onToggle(newActive);
-            onAddTask({
-              id: generateTaskId(),
-              module: "Pool & Spa",
-              description: newActive ? "Guest activated pool heating to 28°C" : "Guest deactivated pool heating",
-              status: "pending",
-              createdAt: new Date().toLocaleTimeString(),
-            });
-          }}
-          role="switch"
-          aria-checked={active}
-          className={`
-            toggle-track relative inline-flex h-7 w-12 shrink-0 cursor-pointer
-            rounded-full transition-colors duration-300
-            ${active ? "bg-[var(--aura-accent,#D4AF37)]" : "bg-border"}
-          `}
-        >
-          <span
-            className={`
-              toggle-thumb absolute left-0.5 top-0.5 inline-block h-6 w-6
-              rounded-full bg-white shadow-sm
-              ${active ? "translate-x-5" : "translate-x-0"}
-            `}
-          />
-        </button>
-
-        <span
-          className={`text-sm font-light transition-colors duration-300 ${
-            active ? "text-[var(--aura-accent,#D4AF37)]" : "text-text-muted"
-          }`}
-        >
-          {active ? "Active — Heating to 28°C" : "Inactive"}
-        </span>
-      </div>
-
-      {active && (
-        <p className="mt-3 animate-fade-in-up text-xs font-light text-text-muted">
-          Estimated ready: 2 hours
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ── Security Perimeter ───────────────────────────────────────────────────────
-
-function SecurityPerimeter({
-  properties,
-  activePropertyId,
-  onSwitchProperty,
-}: {
-  properties: Property[];
-  activePropertyId: string;
-  onSwitchProperty: (id: string) => void;
-}) {
-  const [showFaceID, setShowFaceID] = useState(false);
-  const [showPropertySelect, setShowPropertySelect] = useState(false);
-  // Staggered per-property perimeter scan times (0 / 4 / 12 min ago)
-  const [scanTimes, setScanTimes] = useState<Record<string, number>>(() =>
-    Object.fromEntries(
-      properties.map((p, i) => [p.id, Date.now() - i * 1000 * 60 * 4])
-    )
-  );
-  const [now, setNow] = useState(Date.now());
-  const [visited, setVisited] = useState<Set<string>>(new Set([activePropertyId]));
-
-  useEffect(() => {
-    const interval = setInterval(() => setNow(Date.now()), 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <>
-      <div
-        className="rounded-xl border border-border p-6 transition-colors duration-300 hover:border-[var(--aura-border-accent,rgba(212,175,55,0.3))] animate-slide-up-staggered gold-glow-hover"
-        style={{ backgroundColor: "var(--aura-card, #1A1A1A)", animationDelay: "200ms" }}
-      >
-        <h4 className="text-sm font-medium tracking-wide text-text-primary">
-          Security Perimeter
-        </h4>
-
-        {/* Status badge */}
-        <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[var(--aura-accent-subtle,rgba(212,175,55,0.15))] bg-[var(--aura-accent-subtle,rgba(212,175,55,0.08))] px-3 py-2">
-          {/* Shield icon */}
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          </svg>
-          <span className="text-xs font-medium tracking-wide text-[var(--aura-accent,#D4AF37)]">
-            CCTV Encrypted | Biometric Vault Lock Active
-          </span>
-        </div>
-
-        <p className="mt-3 text-xs font-light text-text-muted">
-          Last perimeter scan: {formatRelativeTime(scanTimes[activePropertyId] ?? now)}
-        </p>
-
-        {/* Switch Property button */}
-        <button
-          onClick={() => setShowPropertySelect(!showPropertySelect)}
-          className="mt-6 w-full rounded-lg border border-border px-4 py-3 text-xs font-medium tracking-wider text-text-secondary transition-all duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-[var(--aura-accent,#D4AF37)]"
-        >
-          Switch Property
-        </button>
-
-        {showPropertySelect && (
-          <div className="mt-2 overflow-hidden rounded-lg border border-border">
-            {properties.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => {
-                  if (p.id !== activePropertyId) {
-                    if (!visited.has(p.id)) {
-                      setScanTimes((prev) => ({ ...prev, [p.id]: Date.now() }));
-                      setVisited((prev) => new Set(prev).add(p.id));
-                    }
-                    onSwitchProperty(p.id);
-                  }
-                  setShowPropertySelect(false);
-                }}
-                className={`w-full px-4 py-3 text-left text-xs font-light tracking-wide transition-colors ${
-                  p.id === activePropertyId
-                    ? "bg-[var(--aura-accent-subtle,rgba(212,175,55,0.12))] text-[var(--aura-accent,#D4AF37)]"
-                    : "text-text-secondary hover:bg-charcoal hover:text-text-primary"
-                }`}
-              >
-                {p.name} {p.id === activePropertyId ? "✓" : ""}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* FaceID Modal */}
-      {showFaceID && <FaceIDModal onClose={() => setShowFaceID(false)} />}
-    </>
-  );
-}
-
-// ── FaceID Modal ─────────────────────────────────────────────────────────────
-
-function FaceIDModal({ onClose }: { onClose: () => void }) {
-  const [phase, setPhase] = useState<"scanning" | "verified" | "done">(
-    "scanning"
-  );
-
-  // Simulate authentication: scanning → verified after 2.2s → done after 3.5s
-  useEffect(() => {
-    const scanTimer = setTimeout(() => setPhase("verified"), 2200);
-    const doneTimer = setTimeout(() => setPhase("done"), 3500);
-    return () => {
-      clearTimeout(scanTimer);
-      clearTimeout(doneTimer);
-    };
-  }, []);
-
-  const handleDone = () => {
-    if (phase === "done") {
-      onClose();
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      onClick={phase === "done" ? handleDone : undefined}
-    >
-      {/* Backdrop blur */}
-      <div className="absolute inset-0 bg-midnight/80 backdrop-blur-md" />
-
-      {/* Modal card */}
-      <div
-        className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border p-8 text-center animate-fade-in-up"
-        style={{ backgroundColor: "var(--aura-card, #1A1A1A)" }}
-      >
-        {/* Biometric icon */}
-        <div className="mx-auto mb-6 flex h-24 w-24 items-center justify-center">
-          {/* Pulsing ring */}
-          {phase === "scanning" && (
-            <div className="absolute h-20 w-20 animate-faceid-pulse rounded-full" />
-          )}
-
-          {/* Rotating ring with pulse-glow while scanning */}
-          <div
-            className={`
-              flex h-20 w-20 items-center justify-center rounded-full border-2
-              ${phase === "scanning" ? "animate-faceid-ring animate-faceid-pulse-glow" : ""}
-            `}
-            style={{
-              borderColor:
-                phase === "verified" || phase === "done"
-                  ? "var(--aura-accent, #D4AF37)"
-                  : "var(--aura-accent, #D4AF37)",
-              opacity: phase === "scanning" ? 1 : phase === "verified" ? 1 : 0.7,
-            }}
-          >
-            {/* Face silhouette */}
-            <svg
-              width="36"
-              height="36"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              style={{ color: "var(--aura-accent, #D4AF37)" }}
-            >
-              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-              <circle cx="9" cy="7" r="4" />
-              <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-            </svg>
-          </div>
-        </div>
-
-        {/* Status text */}
-        {phase === "scanning" && (
-          <p
-            className="text-sm font-light tracking-wide"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            Authenticating...
-          </p>
-        )}
-
-        {phase === "verified" && (
-          <div className="animate-fade-in-up space-y-2">
-            <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-[var(--aura-accent,#D4AF37)]">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#0B0B0B"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            </div>
-            <p
-              className="text-sm font-medium tracking-wide"
-              style={{ color: "var(--aura-accent, #D4AF37)" }}
-            >
-              Identity Verified
-            </p>
-            <p className="text-xs font-light text-text-muted">
-              Access Granted
-            </p>
-          </div>
-        )}
-
-        {phase === "done" && (
-          <div className="animate-fade-in-up space-y-3">
-            <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-[var(--aura-accent,#D4AF37)]">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#0B0B0B"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            </div>
-            <p
-              className="text-sm font-medium tracking-wide"
-              style={{ color: "var(--aura-accent, #D4AF37)" }}
-            >
-              Identity Verified — Access Granted
-            </p>
-            <button
-              onClick={onClose}
-              className="mt-4 rounded-lg border border-[var(--aura-accent,#D4AF37)] px-6 py-2 text-xs font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-all duration-300 hover:bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))]"
-            >
-              Continue
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// STAFF PANEL — AI Estate Manager (Owner Chat + Staff Checklist)
+// CONCIERGE PANEL — Executive Director Chat (Concierge Tab)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const WELCOME_MESSAGE: ChatMessage = {
@@ -1379,7 +514,7 @@ const WELCOME_MESSAGE: ChatMessage = {
 
 // ── AI Response Engine ─────────────────────────────────────────────────────────
 
-type IntentType = "concierge" | "transport" | "transportChauffeur" | "transportYacht" | "transportAviation" | "housekeeping" | "maintenance" | "security" | "general" | "closing" | "update" | "climateControl" | "poolControl";
+type IntentType = "concierge" | "transport" | "transportChauffeur" | "transportYacht" | "transportAviation" | "housekeeping" | "maintenance" | "security" | "general" | "closing" | "update";
 
 interface DetectedIntent {
   type: IntentType;
@@ -1429,15 +564,8 @@ const intentKeywords: Record<Exclude<IntentType, "general">, string[]> = {
   ],
   security: [
     "security", "gate", "access", "perimeter", "guard", "surveillance",
-    "camera", "patrol", "biometric", "vault", "lock", "safe", "code",
+    "camera", "patrol", "access", "vault", "lock", "safe", "code",
     "valet", "parking", "clearance",
-  ],
-  climateControl: [
-    "temperature", "climate", "cool", "warm", "hot", "cold",
-    "ac", "air conditioning", "heating", "degree", "set temp",
-  ],
-  poolControl: [
-    "pool", "spa", "jacuzzi", "swim", "heat pool", "pool heat",
   ],
 };
 
@@ -1460,25 +588,6 @@ function analyzeIntents(message: string): DetectedIntent[] {
     return [{ type: "update", confidence: "high", specifics: extractedTime }];
   }
 
-
-  // Climate control detection — extract target temperature
-  const climatePattern = /\b(set|change|adjust|make|turn)\b.*\b(temperature|climate|temp|heat|cool|warm|hot|cold|degree|°)\b.*?(\d{1,2})\s*(°c?|celsius|degrees?)?/i;
-  const climateMatch = m.match(climatePattern);
-  if (climateMatch) {
-    const targetTemp = parseInt(climateMatch[3], 10);
-    if (targetTemp >= 16 && targetTemp <= 30) {
-      return [{ type: "climateControl", confidence: "high", specifics: `${targetTemp}°C` }];
-    }
-  }
-
-  // Pool control detection
-  const poolPattern = /\b(turn|switch|set|put|activate|enable|start|heat)\b.*\b(pool|spa|jacuzzi)\b.*\b(on|off|active|heat)/i;
-  const poolOffPattern = /\b(turn|switch)\b.*\b(pool|spa)\b.*\b(off|disable|deactivate)/i;
-  if (poolOffPattern.test(m)) {
-    return [{ type: "poolControl", confidence: "high", specifics: "off" }];
-  } else if (poolPattern.test(m)) {
-    return [{ type: "poolControl", confidence: "high", specifics: "on" }];
-  }
 
   // Arrival detection — used to suppress concierge and elevate housekeeping/maintenance
   const arrivalPattern = /\b(arriv|coming\s+(home|back|to\s+the)|arriverò|arrivo|check[-\s]?in|weekend|tomorrow|domani|staying|vengo|atterr)\b/i;
@@ -1566,20 +675,6 @@ const chauffeurVariants: Array<(s: string) => string> = [
 const aviationVariants: Array<(s: string) => string> = [
   (s) => `I have taken the liberty of arranging priority clearance at the private terminal, Sir. Your flight crew will be briefed within the hour. Shall I coordinate ground transport at both departure and arrival locations?`,
   (s) => `Consider it done, Sir. I am securing your flight plan and arranging priority handling. The jet will be prepared to your exact specifications. Will you require catering onboard?`,
-];
-
-const climateVariants: Array<(s: string) => string> = [
-  (s) => `I have adjusted the climate control to ${s}, Sir. The ambient temperature is now being calibrated to your preference. You should feel the change shortly.`,
-  (s) => `At once, Sir. The estate climate system is being set to ${s}. The HVAC will stabilize within a few minutes.`,
-];
-
-const poolVariants: Array<(s: string) => string> = [
-  (s) => `The pool heating has been activated, Sir. The water will reach 28°C within approximately 2 hours. The spa jets are being primed as we speak.`,
-  (s) => `I have turned on the pool heating system, Sir. The temperature is being raised to 28°C. Would you like me to have towels and refreshments prepared poolside as well?`,
-];
-
-const poolOffVariants: Array<(s: string) => string> = [
-  (s) => `The pool heating has been deactivated, Sir. The system will begin cooling naturally. Is there anything else you would like adjusted?`,
 ];
 
 const maintenanceVariants: Array<(s: string) => string> = [
@@ -1684,16 +779,6 @@ function generateResponse(
         break;
       case "security":
         parts.push(getNextVariant("security", securityVariants)(intent.specifics));
-        break;
-      case "climateControl":
-        parts.push(getNextVariant("climateControl", climateVariants)(intent.specifics));
-        break;
-      case "poolControl":
-        if (intent.specifics === "off") {
-          parts.push(getNextVariant("poolOff", poolOffVariants)(intent.specifics));
-        } else {
-          parts.push(getNextVariant("poolOn", poolVariants)(intent.specifics));
-        }
         break;
       case "general":
         if (message.length < 20) {
@@ -2038,29 +1123,6 @@ function dispatchTasks(intents: DetectedIntent[], message: string): TaskItem[] {
         break;
       }
 
-      case "climateControl": {
-        const tempMatch = message.match(/(\d{1,2})\s*(°c?|celsius|degrees?)?/i);
-        const targetTemp = tempMatch ? parseInt(tempMatch[1], 10) : 22;
-        tasks.push({
-          id: generateTaskId(),
-          module: "Climate Control",
-          description: `Guest requested temperature change to ${targetTemp}°C`,
-          status: "pending", createdAt: new Date().toLocaleTimeString(),
-        });
-        break;
-      }
-
-      case "poolControl": {
-        const isOn = intent.specifics !== "off";
-        tasks.push({
-          id: generateTaskId(),
-          module: "Pool & Spa",
-          description: isOn ? "Guest requested pool heating activation to 28°C" : "Guest requested pool heating deactivation",
-          status: "pending", createdAt: new Date().toLocaleTimeString(),
-        });
-        break;
-      }
-
       case "security": {
         tasks.push(
           {
@@ -2072,7 +1134,7 @@ function dispatchTasks(intents: DetectedIntent[], message: string): TaskItem[] {
           {
             id: generateTaskId(),
             module: "Security",
-            description: "Update biometric access logs & gate codes",
+            description: "Update access logs & gate codes",
             status: "pending", createdAt: new Date().toLocaleTimeString(),
           },
         );
@@ -2109,18 +1171,13 @@ type ProcessingPhase = "idle" | "processing" | "typing";
 
 // ── StaffPanel ─────────────────────────────────────────────────────────────────
 
-function StaffPanel({
+function ConciergePanel({
   tasks,
   setTasks,
-  onEstateTempChange,
-  onPoolToggle,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
-  onEstateTempChange?: (t: number) => void;
-  onPoolToggle?: (a: boolean) => void;
 }) {
-  const [viewMode, setViewMode] = useState<StaffViewMode>("owner");
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
       const stored = localStorage.getItem("aura-messages");
@@ -2211,8 +1268,6 @@ function StaffPanel({
       const suggestionResponses: Record<string, string> = {
         "i'm arriving tomorrow with guests": "Excellent, Sir. I will have the estate fully prepared for your arrival tomorrow. The climate will be set to your preference, housekeeping will refresh every room, and I'll brief the chef for your guest count. Shall I also arrange airport transfers?",
         "book the yacht for sunset": "I would be delighted to arrange your yacht charter, Sir. The Captain is on standby and I can have the tender ready at the private dock within the hour. Shall we aim for a sunset departure with Champagne onboard?",
-        "set temperature to 24 degrees": "Right away, Sir. I am adjusting the climate to 24°C. The interior ambient will reach your preferred temperature shortly.",
-        "activate the pool heating": "The pool heating has been activated, Sir. The water will reach 28°C within approximately 2 hours. The spa jets are being primed as we speak.",
         "prepare the villa for a dinner party": "Certainly, Sir. I will coordinate the full staff — chef, housekeeping, and valet. The dining room will be arranged and the sommelier will prepare the wine selection. How many guests should we expect?",
       };
 
@@ -2257,23 +1312,7 @@ function StaffPanel({
         if (responseTasks.length > 0) {
           const t3 = setTimeout(() => setTasks((prev) => [...prev, ...responseTasks]), 700);
           timersRef.current.push(t3);
-        }
-        // Apply estate state changes
-        const t4 = setTimeout(() => {
-          for (const intent of intents) {
-            if (intent.type === "climateControl") {
-              const tempMatch = trimmed.match(/(\d{1,2})\s*(°c?|celsius|degrees?)?/i);
-              if (tempMatch) {
-                const t = parseInt(tempMatch[1], 10);
-                if (t >= 16 && t <= 30) onEstateTempChange?.(t);
-              }
-            } else if (intent.type === "poolControl") {
-              onPoolToggle?.(intent.specifics !== "off");
-            }
-          }
-        }, 700);
-        timersRef.current.push(t4);
-        return;
+        }        return;
       }
 
       const userMsg: ChatMessage = {
@@ -2315,18 +1354,6 @@ function StaffPanel({
           setMessages((prev) => [...prev, aiMsg]);
           if (responseTasks.length > 0) {
             setTasks((prev) => [...prev, ...responseTasks]);
-          }
-          // Apply estate state changes from AI commands
-          for (const intent of intents) {
-            if (intent.type === "climateControl") {
-              const tempMatch = trimmed.match(/(\d{1,2})\s*(°c?|celsius|degrees?)?/i);
-              if (tempMatch) {
-                const t = parseInt(tempMatch[1], 10);
-                if (t >= 16 && t <= 30) onEstateTempChange?.(t);
-              }
-            } else if (intent.type === "poolControl") {
-              onPoolToggle?.(intent.specifics !== "off");
-            }
           }
           setLatestAiMsgId(aiMsgId);
           // Start typewriter effect
@@ -2376,103 +1403,37 @@ function StaffPanel({
   return (
     <div className="rounded-2xl border border-border bg-charcoal p-6 md:p-10 lg:p-12 flex flex-col">
       {/* Header area */}
-      <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2
-            className="text-2xl font-light tracking-wide md:text-3xl"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            AI Estate Manager
-          </h2>
-          <p className="mt-1 text-sm font-light text-text-secondary">
-            Intelligent Staff Automation
-          </p>
-        </div>
-
-        {/* View Toggle */}
-        <ViewToggle active={viewMode} onChange={setViewMode} />
+      <div className="mb-8">
+        <h2
+          className="text-2xl font-light tracking-wide md:text-3xl"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          Luxury Concierge
+        </h2>
+        <p className="mt-1 text-sm font-light text-text-secondary">
+          Your Executive Director, always on duty
+        </p>
       </div>
 
       {/* Panel Content */}
-      {viewMode === "owner" ? (
-        <OwnerView
-          messages={messages}
-          processingPhase={processingPhase}
-          inputValue={inputValue}
-          onInputChange={setInputValue}
-          onSend={handleSend}
-          messagesEndRef={messagesEndRef}
-          messagesContainerRef={messagesContainerRef}
-          latestAiMsgId={latestAiMsgId}
-          isTypewriting={isTypewriting}
-          typewriterChars={typewriterChars}
-        />
-      ) : (
-        <StaffView
-          tasks={tasks}
-          completedCount={completedCount}
-          totalCount={tasks.length}
-          onToggleTask={handleToggleTask}
-          onAssignTask={handleAssignTask}
-          onEstateTempChange={onEstateTempChange}
-          onPoolToggle={onPoolToggle}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── View Toggle ───────────────────────────────────────────────────────────────
-
-function ViewToggle({
-  active,
-  onChange,
-}: {
-  active: StaffViewMode;
-  onChange: (mode: StaffViewMode) => void;
-}) {
-  return (
-    <div
-      className="relative inline-flex rounded-full border border-border p-0.5"
-      style={{ backgroundColor: "var(--aura-card, #1A1A1A)" }}
-    >
-      {/* Sliding pill background */}
-      <div
-        className={`
-          absolute top-0.5 h-[calc(100%-4px)] w-[calc(50%-2px)] rounded-full
-          transition-all duration-300 ease-out
-        `}
-        style={{
-          backgroundColor: "var(--aura-accent, #D4AF37)",
-          left: active === "owner" ? "2px" : "calc(50% + 0px)",
-        }}
+      {/* Chat — Executive Director */}
+      <OwnerView
+        messages={messages}
+        processingPhase={processingPhase}
+        inputValue={inputValue}
+        onInputChange={setInputValue}
+        onSend={handleSend}
+        messagesEndRef={messagesEndRef}
+        messagesContainerRef={messagesContainerRef}
+        latestAiMsgId={latestAiMsgId}
+        isTypewriting={isTypewriting}
+        typewriterChars={typewriterChars}
       />
-
-      <button
-        onClick={() => onChange("owner")}
-        className={`
-          relative z-10 rounded-full px-4 py-1.5 text-xs font-medium
-          tracking-wide transition-colors duration-300
-          ${active === "owner" ? "text-midnight" : "text-text-muted hover:text-text-secondary"}
-        `}
-      >
-        Owner View
-      </button>
-      <button
-        onClick={() => onChange("staff")}
-        className={`
-          relative z-10 rounded-full px-4 py-1.5 text-xs font-medium
-          tracking-wide transition-colors duration-300
-          ${active === "staff" ? "text-midnight" : "text-text-muted hover:text-text-secondary"}
-        `}
-      >
-        Staff View
-      </button>
     </div>
   );
 }
 
-// ── Owner View — AI Estate Chat ──────────────────────────────────────────────
+// ── Concierge Chat ──────────────────────────────────────────────
 
 function OwnerView({
   messages,
@@ -2795,6 +1756,75 @@ function TypingIndicator() {
   );
 }
 
+// ── StaffPanel — AI-Generated Task Checklist ────────────────────────────────
+
+function StaffPanel({
+  tasks,
+  setTasks,
+}: {
+  tasks: TaskItem[];
+  setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
+}) {
+  const completedCount = tasks.filter(
+    (t) => t.status === "confirmed" || t.status === "completed",
+  ).length;
+
+  const handleToggleTask = useCallback((taskId: string) => {
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id !== taskId) return t;
+        const statusCycle: Record<string, TaskItem["status"]> = {
+          pending: "in_progress",
+          in_progress: "confirmed",
+          confirmed: "completed",
+          completed: "pending",
+        };
+        const nextStatus = statusCycle[t.status] || "pending";
+        return {
+          ...t,
+          status: nextStatus,
+          completedAt:
+            nextStatus === "completed" ? new Date().toLocaleTimeString() : t.completedAt,
+        };
+      }),
+    );
+  }, [setTasks]);
+
+  const handleAssignTask = useCallback(
+    (taskId: string, name: string) => {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, assignedTo: name || undefined } : t)),
+      );
+    },
+    [setTasks],
+  );
+
+  return (
+    <div className="rounded-2xl border border-border bg-charcoal p-6 md:p-10 lg:p-12 flex flex-col">
+      {/* Header area */}
+      <div className="mb-8">
+        <h2
+          className="text-2xl font-light tracking-wide md:text-3xl"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          Staff Operations
+        </h2>
+        <p className="mt-1 text-sm font-light text-text-secondary">
+          AI-generated tasks, dispatched and tracked in real time
+        </p>
+      </div>
+
+      <StaffView
+        tasks={tasks}
+        completedCount={completedCount}
+        totalCount={tasks.length}
+        onToggleTask={handleToggleTask}
+        onAssignTask={handleAssignTask}
+      />
+    </div>
+  );
+}
+
 // ── Staff View — Interactive Checklist ───────────────────────────────────────
 
 function StaffView({
@@ -2803,16 +1833,12 @@ function StaffView({
   totalCount,
   onToggleTask,
   onAssignTask,
-  onEstateTempChange,
-  onPoolToggle,
 }: {
   tasks: TaskItem[];
   completedCount: number;
   totalCount: number;
   onToggleTask: (taskId: string) => void;
   onAssignTask: (taskId: string, name: string) => void;
-  onEstateTempChange?: (t: number) => void;
-  onPoolToggle?: (a: boolean) => void;
 }) {
   const pendingTasks = tasks.filter((t) => t.status === "pending" || t.status === "in_progress");
   const completedTasks = tasks.filter((t) => t.status === "confirmed" || t.status === "completed");
@@ -3140,7 +2166,7 @@ function TaskCard({
 // CONCIERGE PANEL — Luxury Marketplace + Booking Escrow
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function ConciergePanel({
+function ServicesPanel({
   onAddTask,
   onRevenueAdd,
   activeProperty,
@@ -3159,7 +2185,7 @@ function ConciergePanel({
           className="text-2xl font-light tracking-wide md:text-3xl"
           style={{ color: "var(--aura-accent, #D4AF37)" }}
         >
-          Exclusive Services &amp; Experiences
+          Concierge Services
         </h2>
         <p className="mt-2 font-light text-text-secondary">
           Curated luxury, available on demand
@@ -3953,7 +2979,7 @@ function RevenuePanel({
   const revenueStats: RevenueStat[] = [
     { label: "Total Client Spend via App", value: formatCurrency(totalClientSpend), subLabel: "Current quarter" },
     { label: "Agency Net Commissions", value: formatCurrency(totalAgencyCommissions), subLabel: "12% Avg Share" },
-    { label: "Subscriptions / Fee", value: "€2,000.00/yr", subLabel: "1 Property" },
+    { label: "Pricing (demo)", value: subscriptionPrice, subLabel: "1 Property" },
   ];
 
   return (
@@ -4256,7 +3282,7 @@ function BookingStatusBadge({ status }: { status: "approved" | "pending" }) {
 
 // ── Footer ───────────────────────────────────────────────────────────────────
 
-function Footer({ agency }: { agency: AgencyInfo }) {
+function Footer() {
   return (
     <footer className="border-t border-border px-6 py-6 md:px-12 lg:px-24">
       <div className="flex flex-col items-center gap-1 text-center">
@@ -4267,7 +3293,7 @@ function Footer({ agency }: { agency: AgencyInfo }) {
           AURA
         </p>
         <p className="text-[10px] font-light tracking-wide text-text-muted/50">
-          Powered by {agency.name} &copy; {new Date().getFullYear()}
+          {agencyConfig.agencyName} &copy; {new Date().getFullYear()}
         </p>
       </div>
     </footer>

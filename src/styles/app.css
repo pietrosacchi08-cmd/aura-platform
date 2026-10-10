@@ -46,10 +46,9 @@
   }
 }
 
-/* ── Agency Presets ──────────────────────────────────────────────── */
+/* ── Brand Accent (default palette) ─────────────────────────────── */
 
-/* Default — Sotheby's International Realty */
-.agency-sothebys {
+:root {
   --aura-accent: #D4AF37;
   --aura-accent-light: #e0c45e;
   --aura-accent-subtle: rgba(212, 175, 55, 0.15);
@@ -57,28 +56,6 @@
   --aura-surface: #0B0B0B;
   --aura-card: #1A1A1A;
   --aura-border-accent: rgba(212, 175, 55, 0.3);
-}
-
-/* Engel & Völkers */
-.agency-evs {
-  --aura-accent: #C0C0C0;
-  --aura-accent-light: #D8D8D8;
-  --aura-accent-subtle: rgba(192, 192, 192, 0.12);
-  --aura-accent-glow: rgba(192, 192, 192, 0.25);
-  --aura-surface: #0B0B0B;
-  --aura-card: #1A1A1A;
-  --aura-border-accent: rgba(192, 192, 192, 0.25);
-}
-
-/* Lionard */
-.agency-lionard {
-  --aura-accent: #C9A84C;
-  --aura-accent-light: #D4B96A;
-  --aura-accent-subtle: rgba(201, 168, 76, 0.15);
-  --aura-accent-glow: rgba(201, 168, 76, 0.35);
-  --aura-surface: #0A1628;
-  --aura-card: #0F1D35;
-  --aura-border-accent: rgba(201, 168, 76, 0.3);
 }
 
 /* ── Animations ──────────────────────────────────────────────────── */
@@ -164,12 +141,6 @@
 .animate-slide-down {
   animation: slide-down 0.35s ease-out forwards;
   overflow: hidden;
-}
-
-/* ── Agency Color Transition ──────────────────────────────────────── */
-
-.agency-transitioning {
-  transition: background-color 0.6s ease, border-color 0.6s ease;
 }
 
 /* ── Tab Transition ──────────────────────────────────────────────── */
