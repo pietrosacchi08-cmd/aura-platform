@@ -4,8 +4,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import { properties, type Property } from "../data/properties";
 import {
   agencyConfig,
+  computeSplit,
   conciergeImages,
   conciergeServices,
+  revenueConfig,
   subscriptionPrice,
   type ConciergeService,
 } from "../data/config";
@@ -129,6 +131,7 @@ function Home() {
     } catch { /* ignore */ }
     return empty;
   });
+  // Revenue rows are demo data held in memory — never persisted to storage.
   const [revenueByProperty] = useState<
     Record<string, RevenueTransaction[]>
   >(() => {
@@ -136,17 +139,17 @@ function Home() {
       properties.map((p) => [p.id, [] as RevenueTransaction[]])
     );
     seed["ref-6291"] = [
-      { id: "tx-6291-001", service: "Yacht Charter", amount: 6500, auraFee: 195, agencyShare: 780, status: "approved" },
-      { id: "tx-6291-002", service: "Private Chef", amount: 1100, auraFee: 33, agencyShare: 132, status: "approved" },
-      { id: "tx-6291-003", service: "Chauffeur Service", amount: 800, auraFee: 24, agencyShare: 96, status: "approved" },
+      { id: "tx-6291-001", service: "Yacht & Boat Charter", supplier: "Charter partner", guestPrice: 6500, status: "approved" },
+      { id: "tx-6291-002", service: "Private Chef", supplier: "Catering partner", guestPrice: 1100, status: "approved" },
+      { id: "tx-6291-003", service: "Chauffeur & Transfers", supplier: "Transfer partner", guestPrice: 800, status: "approved" },
     ];
     seed["ref-14828"] = [
-      { id: "tx-14828-001", service: "Wine Tasting & Tour", amount: 2200, auraFee: 66, agencyShare: 264, status: "approved" },
-      { id: "tx-14828-002", service: "Helicopter Transfer", amount: 4000, auraFee: 120, agencyShare: 480, status: "approved" },
+      { id: "tx-14828-001", service: "Wine Tasting & Tour", supplier: "Wine partner", guestPrice: 2200, status: "approved" },
+      { id: "tx-14828-002", service: "Helicopter Transfer", supplier: "Transfer partner", guestPrice: 4000, status: "approved" },
     ];
     seed["ref-15864"] = [
-      { id: "tx-15864-001", service: "Spa & Wellness Treatment", amount: 1600, auraFee: 48, agencyShare: 192, status: "approved" },
-      { id: "tx-15864-002", service: "Private Chef", amount: 2500, auraFee: 75, agencyShare: 300, status: "approved" },
+      { id: "tx-15864-001", service: "Spa & Wellness Treatment", supplier: "Spa partner", guestPrice: 1600, status: "approved" },
+      { id: "tx-15864-002", service: "Private Chef", supplier: "Catering partner", guestPrice: 2500, status: "approved" },
     ];
     return seed;
   });
@@ -2795,10 +2798,12 @@ function BookingModal({
 }
 interface RevenueTransaction {
   id: string;
+  /** Canonical catalogue service name, or a descriptive niche service. */
   service: string;
-  amount: number;
-  auraFee: number;      // 3% AURA platform fee
-  agencyShare: number;  // 12% agency commission
+  /** Demo supplier label — the key used for per-supplier overrides. */
+  supplier: string;
+  /** What the guest pays; every share is derived from this via computeSplit. */
+  guestPrice: number;
   status: "approved" | "pending";
 }
 
@@ -2836,13 +2841,34 @@ function RevenuePanel({
   revenueTransactions: RevenueTransaction[];
   activeProperty: Property;
 }) {
-  const totalClientSpend = revenueTransactions.reduce((sum, t) => sum + t.amount, 0);
-  const totalPlatformRevenue = revenueTransactions.filter((t) => t.status === "approved").reduce((sum, t) => sum + t.auraFee, 0);
-  const totalAuraFees = revenueTransactions.reduce((sum, t) => sum + t.auraFee, 0);
-  const totalAgencyCommissions = revenueTransactions.reduce((sum, t) => sum + t.agencyShare, 0);
+  // Every share is derived on render from revenueConfig / per-supplier
+  // overrides via computeSplit — no fee figure is stored or hand-typed.
+  const rows = revenueTransactions
+    // Guard: ignore any legacy row that predates the guestPrice shape so stale
+    // data can never render NaN.
+    .filter((t) => typeof t.guestPrice === "number" && Number.isFinite(t.guestPrice))
+    .map((t) => ({ ...t, split: computeSplit(t.guestPrice, t.supplier) }));
+
+  // Totals are the sum of the rendered rows (the same `rows` array the table maps).
+  const totals = rows.reduce(
+    (acc, r) => ({
+      guestPrice: acc.guestPrice + r.guestPrice,
+      supplierShare: acc.supplierShare + r.split.supplierShare,
+      agencyCommission: acc.agencyCommission + r.split.agencyCommission,
+      auraFee: acc.auraFee + r.split.auraFee,
+    }),
+    { guestPrice: 0, supplierShare: 0, agencyCommission: 0, auraFee: 0 },
+  );
+  const approvedRows = rows.filter((r) => r.status === "approved");
+  const totalClientSpend = totals.guestPrice;
+  const totalPlatformRevenue = approvedRows.reduce((sum, r) => sum + r.split.auraFee, 0);
+  const totalAgencyCommissions = totals.agencyCommission;
+  // Worked example shown in the "How this is calculated" block, taken from the
+  // first rendered row (so it can never drift from the real figures).
+  const workedExample = rows[0];
   const revenueStats: RevenueStat[] = [
     { label: "Total Client Spend via App", value: formatCurrency(totalClientSpend), subLabel: "Current quarter" },
-    { label: "Agency Net Commissions", value: formatCurrency(totalAgencyCommissions), subLabel: "12% Avg Share" },
+    { label: "Agency commission (example)", value: formatCurrency(totalAgencyCommissions), subLabel: `${revenueConfig.agencyCommissionPct}% Avg Share` },
     { label: "Pricing (demo)", value: subscriptionPrice, subLabel: "1 Property" },
   ];
 
@@ -2908,7 +2934,8 @@ function RevenuePanel({
                 style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
               />
               <div className="p-6 pt-7 md:p-8 md:pt-9">
-                <p className="text-xs font-medium uppercase tracking-[0.12em] text-text-muted">
+                <DemoDataBadge />
+                <p className="mt-3 text-xs font-medium uppercase tracking-[0.12em] text-text-muted">
                   {stat.label}
                 </p>
                 <p
@@ -2929,9 +2956,12 @@ function RevenuePanel({
       {/* Part B: Micro-Ledger */}
       <div className="rounded-2xl border border-border bg-charcoal p-8 md:p-10 lg:p-12">
         <div className="mb-8">
-          <h3 className="text-xl font-light tracking-wide text-text-primary md:text-2xl">
-            Recent Transactions
-          </h3>
+          <div className="flex flex-wrap items-center gap-3">
+            <h3 className="text-xl font-light tracking-wide text-text-primary md:text-2xl">
+              Recent Transactions
+            </h3>
+            <DemoDataBadge />
+          </div>
           <p className="mt-1 text-sm font-light text-text-muted">
             Current quarter — agency commission breakdown
           </p>
@@ -2946,13 +2976,16 @@ function RevenuePanel({
                   Service
                 </th>
                 <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
-                  Amount
+                  Guest price
                 </th>
                 <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
-                  AURA Fee
+                  {`Supplier (${revenueConfig.supplierSharePct}%)`}
                 </th>
                 <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
-                  Agency Share
+                  {`Agency (${revenueConfig.agencyCommissionPct}%)`}
+                </th>
+                <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                  {`AURA (${revenueConfig.auraFeePct}%)`}
                 </th>
                 <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
                   Status
@@ -2960,7 +2993,7 @@ function RevenuePanel({
               </tr>
             </thead>
             <tbody>
-              {revenueTransactions.map((tx, idx) => {
+              {rows.map((tx, idx) => {
                 const isEven = idx % 2 === 0;
                 return (
                   <tr
@@ -2974,21 +3007,27 @@ function RevenuePanel({
                   >
                     <td className="py-4 pl-4 text-sm font-light tracking-wide text-text-primary first:rounded-l-lg">
                       {tx.service}
+                      <span className="mt-0.5 block text-[11px] font-light text-text-muted">
+                        {tx.supplier}
+                      </span>
                     </td>
                     <td className="py-4 text-right text-sm font-light text-text-secondary">
-                      {formatCurrency(tx.amount)}
+                      {formatCurrency(tx.guestPrice)}
                     </td>
-                    <td
-                      className="py-4 pr-2 text-right text-sm font-light tracking-wide"
-                      style={{ color: "var(--aura-accent, #D4AF37)" }}
-                    >
-                      {formatCurrency(tx.auraFee)}
+                    <td className="py-4 pr-2 text-right text-sm font-light text-text-secondary">
+                      {formatCurrency(tx.split.supplierShare)}
                     </td>
                     <td
                       className="py-4 pr-2 text-right text-sm font-medium tracking-wide"
                       style={{ color: "var(--aura-accent, #D4AF37)" }}
                     >
-                      {formatCurrency(tx.agencyShare)}
+                      {formatCurrency(tx.split.agencyCommission)}
+                    </td>
+                    <td
+                      className="py-4 pr-2 text-right text-sm font-light tracking-wide"
+                      style={{ color: "var(--aura-accent, #D4AF37)" }}
+                    >
+                      {formatCurrency(tx.split.auraFee)}
                     </td>
                     <td className="py-4 pr-4 text-right last:rounded-r-lg">
                       <BookingStatusBadge status={tx.status} />
@@ -3002,7 +3041,7 @@ function RevenuePanel({
             <tfoot>
               <tr>
                 <td
-                  colSpan={5}
+                  colSpan={6}
                   className="pt-6"
                 >
                   <div
@@ -3015,34 +3054,86 @@ function RevenuePanel({
                   />
                 </td>
               </tr>
-              <tr>
-                <td className="py-3 pl-4 text-sm font-medium tracking-wide text-text-primary">
-                  Totals
+              {/* Totals row — summed from the rows rendered above. */}
+              <tr className="border-t border-[var(--aura-border-accent,rgba(212,175,55,0.3))]">
+                <td className="py-3 pl-4 text-sm font-semibold tracking-wide text-text-primary">
+                  Total
                 </td>
-                <td className="py-3 text-right text-sm font-medium text-text-primary">
-                  {formatCurrency(totalClientSpend)}
+                <td className="py-3 text-right text-sm font-semibold text-text-primary">
+                  {formatCurrency(totals.guestPrice)}
                 </td>
-                <td
-                  className="py-3 text-right text-sm font-medium tracking-wide"
-                  style={{ color: "var(--aura-accent, #D4AF37)" }}
-                >
-                  {formatCurrency(totalAuraFees)}
+                <td className="py-3 pr-2 text-right text-sm font-semibold text-text-primary">
+                  {formatCurrency(totals.supplierShare)}
                 </td>
                 <td
-                  className="py-3 text-right text-sm font-medium tracking-wide"
+                  className="py-3 pr-2 text-right text-sm font-semibold tracking-wide"
                   style={{ color: "var(--aura-accent, #D4AF37)" }}
                 >
-                  {formatCurrency(totalAgencyCommissions)}
+                  {formatCurrency(totals.agencyCommission)}
+                </td>
+                <td
+                  className="py-3 pr-2 text-right text-sm font-semibold tracking-wide"
+                  style={{ color: "var(--aura-accent, #D4AF37)" }}
+                >
+                  {formatCurrency(totals.auraFee)}
                 </td>
                 <td className="py-3 pr-4 text-right">
                   <span className="text-[11px] font-light text-text-muted">
-                    {revenueTransactions.filter((t) => t.status === "approved").length} of{" "}
-                    {revenueTransactions.length} approved
+                    {approvedRows.length} of {rows.length} approved
                   </span>
                 </td>
               </tr>
             </tfoot>
           </table>
+        </div>
+
+        {/* How this is calculated */}
+        <div
+          className="mt-8 rounded-xl border border-border p-6 md:p-7"
+          style={{ backgroundColor: "#1E1E1E" }}
+        >
+          <h4 className="text-sm font-medium uppercase tracking-[0.12em] text-text-primary">
+            How this is calculated
+          </h4>
+          <ul className="mt-4 space-y-2 text-sm font-light text-text-secondary">
+            <li>
+              Guest price — the amount the guest is quoted and pays through the app.
+            </li>
+            <li>
+              Supplier share ({revenueConfig.supplierSharePct}%) — the remainder, i.e. the
+              guest price less both commissions below.
+            </li>
+            <li>
+              Agency commission ({revenueConfig.agencyCommissionPct}%) — retained by the agency.
+            </li>
+            <li>
+              AURA platform fee ({revenueConfig.auraFeePct}%) — the platform's share.
+            </li>
+          </ul>
+          {workedExample && (
+            <p className="mt-4 text-sm font-light text-text-secondary">
+              Worked example — {workedExample.service} at{" "}
+              {formatCurrency(workedExample.guestPrice)}: supplier{" "}
+              <span style={{ color: "var(--aura-accent, #D4AF37)" }}>
+                {formatCurrency(workedExample.split.supplierShare)}
+              </span>{" "}
+              · agency{" "}
+              <span style={{ color: "var(--aura-accent, #D4AF37)" }}>
+                {formatCurrency(workedExample.split.agencyCommission)}
+              </span>{" "}
+              · AURA{" "}
+              <span style={{ color: "var(--aura-accent, #D4AF37)" }}>
+                {formatCurrency(workedExample.split.auraFee)}
+              </span>
+              .
+            </p>
+          )}
+          <p className="mt-4 text-xs font-light text-text-muted">
+            Example values for demonstration only.
+          </p>
+          <p className="mt-2 text-xs font-light text-text-muted/70">
+            Percentages are per-agency configuration and can be overridden per supplier.
+          </p>
         </div>
       </div>
 
@@ -3062,7 +3153,7 @@ function RevenuePanel({
             <div className="space-y-3">
               <div className="flex items-baseline gap-2">
                 <span className="text-sm font-light text-text-muted">
-                  Total Platform Revenue (3% Commission):
+                  Total Platform Revenue ({revenueConfig.auraFeePct}% Commission):
                 </span>
                 <span
                   className="text-xl font-light tracking-wide md:text-2xl"
@@ -3073,7 +3164,7 @@ function RevenuePanel({
               </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-sm font-light text-text-muted">
-                  Total Agency Commissions (12%):
+                  Total Agency Commission ({revenueConfig.agencyCommissionPct}%):
                 </span>
                 <span
                   className="text-xl font-light tracking-wide md:text-2xl"
@@ -3105,6 +3196,24 @@ function RevenuePanel({
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Demo Data Badge ───────────────────────────────────────────────────────────
+
+/** Small pill marking figures that are illustrative rather than real. */
+function DemoDataBadge() {
+  return (
+    <span
+      className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em]"
+      style={{
+        borderColor: "var(--aura-border-accent, rgba(212,175,55,0.3))",
+        color: "var(--aura-accent, #D4AF37)",
+        backgroundColor: "var(--aura-accent-subtle, rgba(212,175,55,0.1))",
+      }}
+    >
+      Demo data
+    </span>
   );
 }
 
