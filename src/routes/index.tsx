@@ -41,6 +41,34 @@ interface ChatMessage {
   content: string;
   tasks?: TaskItem[];
 }
+// ── Guest Requests ───────────────────────────────────────────────────────────
+type GuestRequestStatus =
+  | "received"
+  | "in_progress"
+  | "confirmed"
+  | "completed"
+  | "cancelled";
+interface GuestRequest {
+  id: string;
+  serviceTitle: string;
+  property: string;
+  createdAt: string;
+  status: GuestRequestStatus;
+}
+// Ordered lifecycle shown to the guest as a timeline.
+const GUEST_REQUEST_STEPS: Array<Exclude<GuestRequestStatus, "cancelled">> = [
+  "received",
+  "in_progress",
+  "confirmed",
+  "completed",
+];
+const GUEST_REQUEST_LABELS: Record<GuestRequestStatus, string> = {
+  received: "Received",
+  in_progress: "In progress",
+  confirmed: "Confirmed",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -54,7 +82,7 @@ const tabs: TabDef[] = [
 const tabContent: Record<Tab, TabContent> = {
   concierge: {
     title: "Luxury Concierge",
-    subtitle: "Your Executive Director, always on duty",
+    subtitle: "Your requests, passed to our staff",
   },
   services: {
     title: "Concierge Services",
@@ -101,7 +129,7 @@ function Home() {
     } catch { /* ignore */ }
     return empty;
   });
-  const [revenueByProperty, setRevenueByProperty] = useState<
+  const [revenueByProperty] = useState<
     Record<string, RevenueTransaction[]>
   >(() => {
     const seed: Record<string, RevenueTransaction[]> = Object.fromEntries(
@@ -157,17 +185,57 @@ function Home() {
     [activePropertyId]
   );
 
-  const handleRevenueAdd = useCallback(
-    (tx: Omit<RevenueTransaction, "id">) =>
-      setRevenueByProperty((prev) => ({
-        ...prev,
-        [activePropertyId]: [
-          ...(prev[activePropertyId] ?? []),
-          { ...tx, id: `rtx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
-        ],
-      })),
-    [activePropertyId]
+  // ── Guest requests — request lifecycle for this device ─────────────────────
+  const [guestRequests, setGuestRequests] = useState<GuestRequest[]>(() => {
+    try {
+      const stored = localStorage.getItem("aura-guest-requests");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed as GuestRequest[];
+      }
+    } catch { /* ignore */ }
+    return [];
+  });
+  const [requestsStorageError, setRequestsStorageError] = useState(false);
+
+  // Persist guest requests (guarded — a full or blocked store must not break the app)
+  useEffect(() => {
+    try {
+      localStorage.setItem("aura-guest-requests", JSON.stringify(guestRequests));
+      setRequestsStorageError(false);
+    } catch { setRequestsStorageError(true); }
+  }, [guestRequests]);
+
+  const handleCreateRequest = useCallback(
+    (serviceTitle: string) => {
+      const request: GuestRequest = {
+        id: `gr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        serviceTitle,
+        property: properties.find((p) => p.id === activePropertyId)?.name ?? "—",
+        createdAt: new Date().toISOString(),
+        status: "received",
+      };
+      setGuestRequests((prev) => [request, ...prev]);
+    },
+    [activePropertyId, properties],
   );
+
+  const handleUpdateRequestStatus = useCallback(
+    (id: string, status: GuestRequestStatus) => {
+      setGuestRequests((prev) =>
+        prev.map((r) => (r.id === id ? { ...r, status } : r)),
+      );
+    },
+    [],
+  );
+
+  const handleRetryRequests = useCallback(() => {
+    try {
+      const stored = localStorage.getItem("aura-guest-requests");
+      setGuestRequests(stored ? (JSON.parse(stored) as GuestRequest[]) : []);
+      setRequestsStorageError(false);
+    } catch { setRequestsStorageError(true); }
+  }, []);
 
   const handleSwitchProperty = useCallback((id: string) => {
     if (id === activePropertyId) return;
@@ -210,7 +278,11 @@ function Home() {
         setTasks={setActiveTasks}
         onAddTask={handleAddTask}
         revenueTransactions={revenueTransactions}
-        onRevenueAdd={handleRevenueAdd}
+        guestRequests={guestRequests}
+        requestsStorageError={requestsStorageError}
+        onCreateRequest={handleCreateRequest}
+        onUpdateRequestStatus={handleUpdateRequestStatus}
+        onRetryRequests={handleRetryRequests}
       />
       <Footer />
 
@@ -397,7 +469,11 @@ function TabPanels({
   setTasks,
   onAddTask,
   revenueTransactions,
-  onRevenueAdd,
+  guestRequests,
+  requestsStorageError,
+  onCreateRequest,
+  onUpdateRequestStatus,
+  onRetryRequests,
 }: {
   activeTab: Tab;
   activeProperty: Property;
@@ -408,7 +484,11 @@ function TabPanels({
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
   onAddTask: (task: TaskItem) => void;
   revenueTransactions: RevenueTransaction[];
-  onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void;
+  guestRequests: GuestRequest[];
+  requestsStorageError: boolean;
+  onCreateRequest: (serviceTitle: string) => void;
+  onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+  onRetryRequests: () => void;
 }) {
   return (
     <main className="flex-1 px-6 py-10 md:px-12 md:py-14 lg:px-24 lg:py-16">
@@ -431,15 +511,27 @@ function TabPanels({
               `}
             >
               {tab.id === "concierge" ? (
-                <ConciergePanel tasks={tasks} setTasks={setTasks} />
+                <ConciergePanel
+                  tasks={tasks}
+                  setTasks={setTasks}
+                  onCreateRequest={onCreateRequest}
+                />
               ) : tab.id === "services" ? (
                 <ServicesPanel
                   onAddTask={onAddTask}
-                  onRevenueAdd={onRevenueAdd}
                   activeProperty={activeProperty}
+                  guestRequests={guestRequests}
+                  requestsStorageError={requestsStorageError}
+                  onCreateRequest={onCreateRequest}
+                  onRetryRequests={onRetryRequests}
                 />
               ) : tab.id === "staff" ? (
-                <StaffPanel tasks={tasks} setTasks={setTasks} />
+                <StaffPanel
+                  tasks={tasks}
+                  setTasks={setTasks}
+                  guestRequests={guestRequests}
+                  onUpdateRequestStatus={onUpdateRequestStatus}
+                />
               ) : tab.id === "revenue" ? (
                 <RevenuePanel revenueTransactions={revenueTransactions} activeProperty={activeProperty} />
               ) : (
@@ -502,14 +594,14 @@ function PlaceholderPanel({
     </div>
   );
 }
-// CONCIERGE PANEL — Executive Director Chat (Concierge Tab)
+// CONCIERGE PANEL — AURA Concierge Chat (Concierge Tab)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const WELCOME_MESSAGE: ChatMessage = {
   id: "welcome",
   role: "system",
   content:
-    "Good evening. I am the AURA Executive Director. How may I assist with your estate today? I can coordinate staff, manage arrivals, arrange yacht charters, private dining, chauffeur services, aviation, or prepare the property for your visit.",
+    "Good evening. I am AURA Concierge. I take your requests — a private chef, a transfer, a boat, aviation, housekeeping or anything else on the estate — and pass them to our staff, who confirm the arrangements with you. How may I assist?",
 };
 
 // ── AI Response Engine ─────────────────────────────────────────────────────────
@@ -528,6 +620,17 @@ interface AIResponse {
   intents: DetectedIntent[];
 }
 
+// Service intents that become a tracked guest request.
+const REQUEST_INTENT_TITLES: Partial<Record<IntentType, string>> = {
+  concierge: "Private Chef & Dining",
+  transportChauffeur: "Chauffeur & Transfer",
+  transportYacht: "Yacht & Boat Charter",
+  transportAviation: "Private Aviation",
+  transport: "Private Transfer",
+  housekeeping: "Housekeeping",
+  maintenance: "Maintenance",
+  security: "Security",
+};
 // ── Intent Signal Keywords ────────────────────────────────────────────────────
 
 const intentKeywords: Record<Exclude<IntentType, "general">, string[]> = {
@@ -649,59 +752,54 @@ function analyzeIntents(message: string): DetectedIntent[] {
 
 // ── Response Generation ───────────────────────────────────────────────────────
 
+// ── Response Generation ───────────────────────────────────────────────────────
+// AURA never confirms availability, prices or arrangements for the guest — the
+// agency staff do. Every reply to a service request therefore ends with the
+// exact same sentence, and no reply promises execution or quotes a number.
 const arrivalVariants: Array<(s: string) => string> = [
-  (s) => `I will ensure the estate is perfectly prepared for your arrival, Sir. I am briefing the housekeeping and maintenance teams now — your preferred climate settings, fresh linens, and every detail will be attended to. The staff will be ready to welcome you.`,
-  (s) => `Your arrival is being coordinated as we speak, Sir. The villa will be climate-controlled to your liking, the rooms prepared to the highest standard, and the full staff briefed. Is there anything specific you would like prioritized before you land?`,
+  (s) => `Good evening, Sir. I have your arrival noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Thank you, Sir — your arrival and guest count are noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const conciergeVariants: Array<(s: string) => string> = [
-  (s) => `Certainly, Sir. I will have our cellar master bring up a selection of chilled Champagnes. Would you prefer a classic brut or something more rare — a Krug or Dom Pérignon, perhaps?`,
-  (s) => `At once, Sir. I am arranging for our finest Champagne to be chilled and served. Shall I coordinate light canapés to accompany?`,
-  (s) => `With pleasure, Sir. I am personally curating a selection from our cellar. A chilled bottle of our finest will be ready shortly. Would you like the sommelier to present the options tableside?`,
-  (s) => `Of course, Sir. I will have the dining room prepared and our chef briefed immediately. May I suggest our seasonal tasting menu paired with a vintage Champagne?`,
+  (s) => `Certainly, Sir. Your dining request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `With pleasure, Sir. I have your request for our cellar selection. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Of course, Sir. Your request for the chef and the dining room is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Thank you, Sir. I have recorded your request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const transportYachtVariants: Array<(s: string) => string> = [
-  (s) => `I would be delighted to arrange your yacht charter. The Captain is on standby and I can have the tender ready at the private dock within the hour. Shall we aim for a sunset departure?`,
-  (s) => `It would be my pleasure, Sir. The yacht is being prepared as we speak. The crew will have everything in order — shall I coordinate a sunset departure with Champagne onboard?`,
-  (s) => `Most certainly, Sir. I am liaising with the Captain now. The tender will be at your private dock and the yacht prepared to the highest standard. What time shall we schedule departure?`,
+  (s) => `Certainly, Sir. Your boat request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `With pleasure, Sir. I have your charter request noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Of course, Sir. I have noted the date you have in mind for the boat. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const chauffeurVariants: Array<(s: string) => string> = [
-  (s) => `At once, Sir. Your chauffeur will be briefed and the vehicle prepared to the highest standard. Shall I arrange a specific vehicle from the fleet — the Rolls-Royce Phantom or the Mercedes-Maybach for your transfer?`,
-  (s) => `Immediately, Sir. I am dispatching your driver now. The vehicle will be waiting at the entrance, climate-controlled and ready. Would you prefer the Phantom this evening?`,
+  (s) => `At once, Sir. Your transfer request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Certainly, Sir. I have your chauffeur request noted, together with the time you mentioned. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const aviationVariants: Array<(s: string) => string> = [
-  (s) => `I have taken the liberty of arranging priority clearance at the private terminal, Sir. Your flight crew will be briefed within the hour. Shall I coordinate ground transport at both departure and arrival locations?`,
-  (s) => `Consider it done, Sir. I am securing your flight plan and arranging priority handling. The jet will be prepared to your exact specifications. Will you require catering onboard?`,
+  (s) => `Of course, Sir. Your aviation request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Thank you, Sir. I have recorded your flight request and the route details. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const maintenanceVariants: Array<(s: string) => string> = [
-  (s) => `I am checking the systems now, Sir. I will have the temperature adjusted to your preference and confirm all climate zones are optimal. The pool heating status will be reported shortly.`,
-  (s) => `Right away, Sir. I am accessing the smart-estate controls and will have the climate and pool systems calibrated to your specifications. Is there a particular temperature you prefer?`,
+  (s) => `Understood, Sir. Your climate and pool request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Of course, Sir. I have recorded your maintenance request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const securityVariants: Array<(s: string) => string> = [
-  (s) => `Immediately, Sir. I am initiating a full perimeter sweep and updating all access protocols. Your security detail will confirm within the hour. Would you like me to activate the enhanced surveillance package for the evening?`,
-  (s) => `At once, Sir. All access codes are being refreshed and the perimeter is under active monitoring. I will have the security team report directly. Shall I also coordinate valet parking for any arriving guests?`,
+  (s) => `Understood, Sir. Your security request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Certainly, Sir. I have recorded your access and security request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const housekeepingVariants: Array<(s: string) => string> = [
-  (s) => `I will have the housekeeping team attend to that immediately, Sir. The rooms will be prepared to the highest standard — fresh linens, amenities refreshed, and every detail considered.`,
-  (s) => `Certainly, Sir. I am briefing the housekeeping staff now. They will ensure every room is immaculate and all amenities are stocked. Is there anything specific you would like prioritized?`,
+  (s) => `Certainly, Sir. Your housekeeping request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (s) => `Of course, Sir. I have recorded your housekeeping request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
-
 const generalShortVariants: Array<(s: string) => string> = [
-  (s) => `Sir, I would be delighted to assist. To ensure I make the most precise arrangements, could you share a bit more detail? For example, the date of your arrival, the number of guests, or which services you require — yacht, dining, chauffeur, or aviation.`,
-  (s) => `I am at your service, Sir. Allow me to coordinate whatever you need — might you tell me a bit more about your plans so I can ensure everything is perfectly arranged?`,
-  (s) => `At your disposal, Sir. I can arrange anything from a private dinner to a yacht charter. What would you like me to prepare for you today?`,
+  (s) => `Sir, I would be delighted to assist. Could you share a little more detail — the service you have in mind, the date, and the number of guests?`,
+  (s) => `I am at your service, Sir. Tell me a little more about what you need so it reaches the right staff.`,
+  (s) => `At your disposal, Sir. I can take requests for dining, transfers, boats, aviation and the house — what would you like to request today?`,
 ];
-
 const generalLongVariants: Array<(s: string) => string> = [
-  (s) => `Thank you, Sir. I have noted your request and am coordinating with the appropriate teams. Your estate staff — Chef, Housekeeping, Maintenance, Security, and Concierge — stands ready. Is there anything specific you would like me to prioritize?`,
-  (s) => `I understand, Sir. I will ensure your request receives immediate attention. The entire estate team is at your disposal. Shall I focus on any particular area first?`,
-  (s) => `Of course, Sir. I am dispatching instructions to the relevant teams now. Your estate will be prepared exactly as you wish. Is there anything else you would like to add?`,
+  (s) => `Thank you, Sir. I have noted your message. Which service shall I pass to our staff — dining, transfers, boats, aviation or housekeeping?`,
+  (s) => `Understood, Sir. If you tell me the service and the details, I can pass the request to our staff. Is there anything else you would like to add?`,
+  (s) => `Of course, Sir. I have noted this. What would you like me to pass to our staff?`,
 ];
 
 const variantCounters: Record<string, number> = {};
@@ -716,8 +814,13 @@ function getNextVariant<T>(key: string, variants: T[]): T {
 function generateResponse(
   intents: DetectedIntent[],
   message: string,
-  conversationContext: string[],
+  _conversationContext: string[],
 ): string {
+  // Availability and price questions are always answered by our staff — AURA
+  // never quotes a number or confirms availability for the guest.
+  if (/\b(availab\w*|how much|price|pricing|cost|costs|rate|rates|quote|quotation)\b/i.test(message)) {
+    return "Our staff will confirm this for you.";
+  }
   // Closing intent — return warm farewell
   if (intents.length === 1 && intents[0].type === "closing") {
     return "I remain at your complete disposal, Sir. Have a wonderful day.";
@@ -726,7 +829,7 @@ function generateResponse(
   // Update intent — return time-update acknowledgment
   if (intents.length === 1 && intents[0].type === "update") {
     const newTime = intents[0].specifics;
-    return `Understood, Sir. I have updated the timing to ${newTime}. Your staff will be notified immediately.`;
+    return `Understood, Sir. I have noted the change of timing to ${newTime} and passed it to our staff.`;
   }
 
   // Arrival detection for response generation
@@ -792,10 +895,8 @@ function generateResponse(
     }
   }
 
-  if (conversationContext.length > 0 && Math.random() < 0.3) {
-    const ctx = conversationContext[conversationContext.length - 1];
-    parts.push(`As with your previous request regarding "${ctx}", I will ensure the same level of care and attention.`);
-  }
+  // No trailing promise is appended: the mandated request-receipt sentence must
+  // always be the final sentence of a service reply.
 
   // Compose unified response for multi-intent, single variant for single intent
   if (parts.length === 1) {
@@ -811,37 +912,10 @@ function composeMultiIntent(
 ): string {
   // Get the unique intent types in order
   const types = intents.map(i => i.type).filter((t, idx, arr) => arr.indexOf(t) === idx);
-  
   if (types.length <= 1) return parts[0];
-
-  // 2-intent combinations
-  if (types.length === 2) {
-    const [a, b] = types;
-    
-    // Concierge + housekeeping
-    if ((a === "concierge" && b === "housekeeping") || (a === "housekeeping" && b === "concierge")) {
-      return "Certainly, Sir. I will arrange the refreshments you requested and have housekeeping attend to the preparations simultaneously. The estate will be in perfect order.";
-    }
-    // Concierge + maintenance
-    if ((a === "concierge" && b === "maintenance") || (a === "maintenance" && b === "concierge")) {
-      return "At once, Sir. While I arrange the requested services, I will have maintenance adjust the systems to your preference. Everything will be seamless.";
-    }
-    // Transport + concierge
-    if ((a === "transport" && b === "concierge") || (a === "concierge" && b === "transport")) {
-      return "I would be delighted to coordinate both, Sir. The transport will be prepared while our team handles your concierge request. Everything will be seamless.";
-    }
-    // Housekeeping + maintenance
-    if ((a === "housekeeping" && b === "maintenance") || (a === "maintenance" && b === "housekeeping")) {
-      return "I will ensure the estate is perfectly prepared, Sir. Housekeeping and maintenance are being briefed now — every detail will be attended to.";
-    }
-    // General fallback for 2 intents
-    return "I am coordinating across multiple teams, Sir. Everything will be arranged to the highest standard.";
-  }
-
-  // 3+ intents — comprehensive response
-  return "I am orchestrating this across every department, Sir. The concierge, housekeeping, and maintenance teams are all being briefed — the estate will be in flawless condition.";
+  // Several requests in one message — one receipt, one mandated closing line.
+  return `Certainly, Sir. I have noted all of it. I've sent your request to our staff. You'll see the status here once it's confirmed.`;
 }
-
 // ── Task Dispatch ─────────────────────────────────────────────────────────────
 
 function extractGuestCount(message: string): number {
@@ -1174,9 +1248,11 @@ type ProcessingPhase = "idle" | "processing" | "typing";
 function ConciergePanel({
   tasks,
   setTasks,
+  onCreateRequest,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
+  onCreateRequest: (serviceTitle: string) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
@@ -1259,6 +1335,14 @@ function ConciergePanel({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, processingPhase, typewriterChars]);
 
+  // Every service request the guest makes is recorded in the request lifecycle.
+  const registerRequestFromIntents = useCallback(
+    (intents: DetectedIntent[]) => {
+      const hit = intents.find((i) => REQUEST_INTENT_TITLES[i.type]);
+      if (hit) onCreateRequest(REQUEST_INTENT_TITLES[hit.type] as string);
+    },
+    [onCreateRequest],
+  );
   const handleSend = useCallback(
     (text: string) => {
       const trimmed = text.trim();
@@ -1266,9 +1350,9 @@ function ConciergePanel({
       sendingRef.current = true;
 
       const suggestionResponses: Record<string, string> = {
-        "i'm arriving tomorrow with guests": "Excellent, Sir. I will have the estate fully prepared for your arrival tomorrow. The climate will be set to your preference, housekeeping will refresh every room, and I'll brief the chef for your guest count. Shall I also arrange airport transfers?",
-        "book the yacht for sunset": "I would be delighted to arrange your yacht charter, Sir. The Captain is on standby and I can have the tender ready at the private dock within the hour. Shall we aim for a sunset departure with Champagne onboard?",
-        "prepare the villa for a dinner party": "Certainly, Sir. I will coordinate the full staff — chef, housekeeping, and valet. The dining room will be arranged and the sommelier will prepare the wine selection. How many guests should we expect?",
+        "request a private chef": "With pleasure, Sir. Your private chef request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.",
+        "request a transfer": "Certainly, Sir. Your transfer request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.",
+        "request a boat": "Of course, Sir. Your boat request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.",
       };
 
       const normalized = trimmed.toLowerCase().replace(/[.?!,]+$/, "").trim();
@@ -1308,6 +1392,7 @@ function ConciergePanel({
 
         // Also dispatch relevant tasks based on content
         const intents = analyzeIntents(trimmed);
+        registerRequestFromIntents(intents);
         const responseTasks = dispatchTasks(intents, trimmed);
         if (responseTasks.length > 0) {
           const t3 = setTimeout(() => setTasks((prev) => [...prev, ...responseTasks]), 700);
@@ -1335,6 +1420,7 @@ function ConciergePanel({
       const t1 = setTimeout(() => {
         // Analyze intents, generate response, dispatch tasks
         const intents = analyzeIntents(trimmed);
+        registerRequestFromIntents(intents);
         const responseContent = generateResponse(intents, trimmed, conversationTopicsRef.current);
         const responseTasks = dispatchTasks(intents, trimmed);
         const aiMsgId = `ai-${Date.now()}`;
@@ -1369,7 +1455,7 @@ function ConciergePanel({
 
       timersRef.current.push(t1);
     },
-    [processingPhase],
+    [processingPhase, registerRequestFromIntents],
   );
 
   const handleToggleTask = useCallback((taskId: string) => {
@@ -1411,12 +1497,12 @@ function ConciergePanel({
           Luxury Concierge
         </h2>
         <p className="mt-1 text-sm font-light text-text-secondary">
-          Your Executive Director, always on duty
+          Your requests, passed to our staff
         </p>
       </div>
 
       {/* Panel Content */}
-      {/* Chat — Executive Director */}
+      {/* Chat — AURA Concierge */}
       <OwnerView
         messages={messages}
         processingPhase={processingPhase}
@@ -1489,10 +1575,10 @@ function OwnerView({
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium tracking-wide text-text-primary">
-            AURA Executive Director
+            AURA Concierge
           </p>
           <p className="text-xs text-text-muted">
-            {isBusy ? "Preparing your arrangements..." : "Your estate manager, always on duty"}
+            {isBusy ? "Taking your request..." : "Here to take your request"}
           </p>
         </div>
         <span
@@ -1534,36 +1620,20 @@ function OwnerView({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Suggestion Chips */}
+      {/* Request Chips */}
       <div className="mt-3 flex flex-wrap gap-2 flex-shrink-0">
-        <button
-          onClick={() => onSend("I'm arriving tomorrow with guests")}
-          disabled={isBusy}
-          className="rounded-full border px-3 py-1.5 text-[11px] font-light tracking-wide transition-all duration-300 border-[var(--aura-border-accent,rgba(212,175,55,0.3))] text-[var(--aura-accent,#D4AF37)] hover:bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-        >
-          Arriving tomorrow with guests
-        </button>
-        <button
-          onClick={() => onSend("Book the yacht for sunset")}
-          disabled={isBusy}
-          className="rounded-full border px-3 py-1.5 text-[11px] font-light tracking-wide transition-all duration-300 border-[var(--aura-border-accent,rgba(212,175,55,0.3))] text-[var(--aura-accent,#D4AF37)] hover:bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-        >
-          Book the yacht for sunset
-        </button>
-        <button
-          onClick={() => onSend("Arrange a private dinner for 6")}
-          disabled={isBusy}
-          className="rounded-full border px-3 py-1.5 text-[11px] font-light tracking-wide transition-all duration-300 border-[var(--aura-border-accent,rgba(212,175,55,0.3))] text-[var(--aura-accent,#D4AF37)] hover:bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-        >
-          Arrange a private dinner for 6
-        </button>
-        <button
-          onClick={() => onSend("Prepare the estate for a weekend stay")}
-          disabled={isBusy}
-          className="rounded-full border px-3 py-1.5 text-[11px] font-light tracking-wide transition-all duration-300 border-[var(--aura-border-accent,rgba(212,175,55,0.3))] text-[var(--aura-accent,#D4AF37)] hover:bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-        >
-          Prepare the estate for a weekend stay
-        </button>
+        {["Request a private chef", "Request a transfer", "Request a boat"].map(
+          (prompt) => (
+            <button
+              key={prompt}
+              onClick={() => onSend(prompt)}
+              disabled={isBusy}
+              className="rounded-full border px-3 py-1.5 text-[11px] font-light tracking-wide transition-all duration-300 border-[var(--aura-border-accent,rgba(212,175,55,0.3))] text-[var(--aura-accent,#D4AF37)] hover:bg-[var(--aura-accent-subtle,rgba(212,175,55,0.15))] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              {prompt}
+            </button>
+          ),
+        )}
       </div>
 
       {/* Input Area */}
@@ -1649,7 +1719,7 @@ function GoldPulseLoader() {
             className="animate-status-pulse text-xs font-light tracking-wide"
             style={{ color: "var(--aura-accent, #D4AF37)" }}
           >
-            AURA Executive Director is preparing your arrangements...
+            AURA Concierge is taking your request...
           </p>
         </div>
       </div>
@@ -1761,9 +1831,13 @@ function TypingIndicator() {
 function StaffPanel({
   tasks,
   setTasks,
+  guestRequests,
+  onUpdateRequestStatus,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
+  guestRequests: GuestRequest[];
+  onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
 }) {
   const completedCount = tasks.filter(
     (t) => t.status === "confirmed" || t.status === "completed",
@@ -1821,6 +1895,63 @@ function StaffPanel({
         onToggleTask={handleToggleTask}
         onAssignTask={handleAssignTask}
       />
+
+      {/* Guest Requests — staff move a request along its lifecycle */}
+      {guestRequests.length > 0 && (
+        <div className="mt-8 border-t border-border pt-6">
+          <h3
+            className="text-xs font-medium uppercase tracking-[0.15em]"
+            style={{ color: "var(--aura-accent, #D4AF37)" }}
+          >
+            Guest Requests
+          </h3>
+          <p className="mt-1 text-xs font-light text-text-muted">
+            Advance a request once it has been confirmed with the guest.
+          </p>
+          <div className="mt-4 space-y-3">
+            {guestRequests.map((request) => (
+              <div
+                key={request.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border px-4 py-3"
+                style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-medium tracking-wide text-text-primary">
+                    {request.serviceTitle}
+                  </p>
+                  <p className="mt-0.5 text-[10px] font-light text-text-muted">
+                    {request.property} · {GUEST_REQUEST_LABELS[request.status]}
+                  </p>
+                </div>
+                <select
+                  value={request.status}
+                  onChange={(e) =>
+                    onUpdateRequestStatus(
+                      request.id,
+                      e.target.value as GuestRequestStatus,
+                    )
+                  }
+                  className="cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-[10px] font-light tracking-wide text-text-secondary outline-none"
+                >
+                  {(
+                    [
+                      "received",
+                      "in_progress",
+                      "confirmed",
+                      "completed",
+                      "cancelled",
+                    ] as GuestRequestStatus[]
+                  ).map((s) => (
+                    <option key={s} value={s} className="bg-charcoal text-text-primary">
+                      {GUEST_REQUEST_LABELS[s]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2168,12 +2299,18 @@ function TaskCard({
 
 function ServicesPanel({
   onAddTask,
-  onRevenueAdd,
   activeProperty,
+  guestRequests,
+  requestsStorageError,
+  onCreateRequest,
+  onRetryRequests,
 }: {
   onAddTask: (task: TaskItem) => void;
-  onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void;
   activeProperty: Property;
+  guestRequests: GuestRequest[];
+  requestsStorageError: boolean;
+  onCreateRequest: (serviceTitle: string) => void;
+  onRetryRequests: () => void;
 }) {
   const [bookingService, setBookingService] = useState<ConciergeService | null>(null);
 
@@ -2208,20 +2345,139 @@ function ServicesPanel({
         ))}
       </div>
 
-      {/* Booking Modal */}
+      {/* Your Requests — guest-facing request timeline */}
+      <div className="mt-12">
+        <h3 className="text-lg font-light tracking-wide text-text-primary md:text-xl">
+          Your Requests
+        </h3>
+        <p className="mt-1 text-sm font-light text-text-muted">
+          Every request is passed to our staff, who confirm it with you.
+        </p>
+
+        {requestsStorageError && (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3" style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}>
+            <p className="text-xs font-light text-text-secondary">
+              We couldn't load your requests. Please try again.
+            </p>
+            <button
+              onClick={onRetryRequests}
+              className="cursor-pointer rounded-md border border-[var(--aura-accent,#D4AF37)] px-3 py-1 text-[11px] font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-colors duration-200 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {guestRequests.length === 0 ? (
+          <div className="mt-4 rounded-2xl border border-border px-6 py-8 text-center" style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}>
+            <p className="text-sm font-light text-text-muted">
+              No requests yet — choose a service above and we'll pass it to our staff.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            {guestRequests.map((request) => (
+              <GuestRequestCard key={request.id} request={request} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Request Modal */}
       {bookingService && (
         <BookingModal
           service={bookingService}
           activeProperty={activeProperty}
           onClose={() => setBookingService(null)}
           onAddTask={onAddTask}
-          onRevenueAdd={onRevenueAdd}
+          onCreateRequest={onCreateRequest}
         />
       )}
     </div>
   );
 }
 
+// ── Guest Request Card — status + lifecycle timeline ──────────────────────────
+function GuestRequestCard({ request }: { request: GuestRequest }) {
+  const isCancelled = request.status === "cancelled";
+  const currentIndex = GUEST_REQUEST_STEPS.indexOf(
+    request.status as Exclude<GuestRequestStatus, "cancelled">,
+  );
+  const created = new Date(request.createdAt);
+  const createdLabel = isNaN(created.getTime())
+    ? request.createdAt
+    : created.toLocaleString();
+  const isDone = request.status === "confirmed" || request.status === "completed";
+  return (
+    <div className="rounded-2xl border border-border bg-charcoal p-5 md:p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium tracking-wide text-text-primary">
+            {request.serviceTitle}
+          </p>
+          <p className="mt-1 text-xs font-light text-text-muted">
+            {request.property} · {createdLabel}
+          </p>
+        </div>
+        <span
+          className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ${
+            isDone ? "" : "text-text-muted"
+          }`}
+          style={{
+            borderColor: isDone ? "var(--aura-accent, #D4AF37)" : "#2A2A2A",
+            color: isDone ? "var(--aura-accent, #D4AF37)" : undefined,
+          }}
+        >
+          {GUEST_REQUEST_LABELS[request.status]}
+        </span>
+      </div>
+      {isCancelled ? (
+        <p className="mt-4 text-xs font-light text-text-muted">
+          This request was cancelled — please submit a new one if you still need it.
+        </p>
+      ) : (
+        <div className="mt-5 flex items-start">
+          {GUEST_REQUEST_STEPS.map((step, idx) => {
+            const reached = idx <= currentIndex;
+            return (
+              <div
+                key={step}
+                className={`flex items-center ${idx === GUEST_REQUEST_STEPS.length - 1 ? "" : "flex-1"}`}
+              >
+                <div className="flex flex-col items-center gap-1.5">
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{
+                      backgroundColor: reached
+                        ? "var(--aura-accent, #D4AF37)"
+                        : "#2A2A2A",
+                    }}
+                  />
+                  <span
+                    className={`whitespace-nowrap text-[9px] uppercase tracking-wider ${
+                      reached ? "text-[var(--aura-accent,#D4AF37)]" : "text-text-muted"
+                    }`}
+                  >
+                    {GUEST_REQUEST_LABELS[step]}
+                  </span>
+                </div>
+                {idx < GUEST_REQUEST_STEPS.length - 1 && (
+                  <span
+                    className="mx-2 mb-4 h-px flex-1"
+                    style={{
+                      backgroundColor:
+                        idx < currentIndex ? "var(--aura-accent, #D4AF37)" : "#2A2A2A",
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 // ── Service Card ──────────────────────────────────────────────────────────────
 
 function ServiceCard({
@@ -2381,101 +2637,45 @@ function BookingModal({
   activeProperty,
   onClose,
   onAddTask,
-  onRevenueAdd,
+  onCreateRequest,
 }: {
   service: ConciergeService;
   activeProperty: Property;
   onClose: () => void;
   onAddTask: (task: TaskItem) => void;
-  onRevenueAdd: (tx: Omit<RevenueTransaction, "id">) => void;
+  onCreateRequest: (serviceTitle: string) => void;
 }) {
-  const [stage, setStage] = useState<1 | 2 | 3>(1);
-  const [paymentState, setPaymentState] = useState<"idle" | "processing" | "paid">("idle");
-  const [paymentRef, setPaymentRef] = useState("");
+  const [step, setStep] = useState<"details" | "sent">("details");
   const [isClosing, setIsClosing] = useState(false);
-  const finalizedRef = useRef(false);
-  const isPriced = service.priceValue !== null;
-
-  // Null-price services (Custom Quote / On Request): finalize once on reaching
-  // Checkout — Request Submitted, no payment, pending revenue awaiting quote
-  useEffect(() => {
-    if (stage === 3 && !isPriced && !finalizedRef.current) {
-      finalizedRef.current = true;
-      onAddTask({
-        id: generateTaskId(),
-        module: "Concierge",
-        description: `[CONCIERGE] ${service.title} — ${service.price} — Request submitted, awaiting quote`,
-        status: "pending",
-        createdAt: new Date().toLocaleTimeString(),
-      });
-      onRevenueAdd({
-        service: service.title,
-        amount: 0,
-        auraFee: 0,
-        agencyShare: 0,
-        status: "pending",
-      });
-    }
-  }, [stage, isPriced, onAddTask, onRevenueAdd, service.title, service.price]);
-
-  useEffect(() => {
-    const t1 = setTimeout(() => setStage(2), 1500);
-    const t2 = setTimeout(() => setStage(3), 3000);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
-  }, []);
-
+  const sentRef = useRef(false);
   const handleClose = () => {
     setIsClosing(true);
     setTimeout(onClose, 200);
   };
-
-  // Priced services: simulate payment, then finalize task + revenue exactly once
-  const handlePayNow = () => {
-    if (!isPriced || paymentState !== "idle" || finalizedRef.current) return;
-    setPaymentState("processing");
-    const ref = `AURA-PAY-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    setTimeout(() => {
-      setPaymentRef(ref);
-      setPaymentState("paid");
-      if (!finalizedRef.current) {
-        finalizedRef.current = true;
-        onAddTask({
-          id: generateTaskId(),
-          module: "Concierge",
-          description: `[CONCIERGE] ${service.title} — ${service.price} — Paid via AURA Vault (${ref})`,
-          status: "pending",
-          createdAt: new Date().toLocaleTimeString(),
-        });
-        onRevenueAdd({
-          service: service.title,
-          amount: service.priceValue ?? 0,
-          auraFee: Math.round((service.priceValue ?? 0) * 0.03),
-          agencyShare: Math.round((service.priceValue ?? 0) * 0.12),
-          status: "approved",
-        });
-      }
-    }, 1500);
+  // Sending a request records it for the guest and dispatches a staff task.
+  // Nothing is charged here and nothing is confirmed here.
+  const handleSendRequest = () => {
+    if (sentRef.current) return;
+    sentRef.current = true;
+    onAddTask({
+      id: generateTaskId(),
+      module: "Concierge",
+      description: `[CONCIERGE] ${service.title} — ${service.price} — Request submitted, awaiting staff confirmation`,
+      status: "pending",
+      createdAt: new Date().toLocaleTimeString(),
+    });
+    onCreateRequest(service.title);
+    setStep("sent");
   };
-
-  const handleBackdropClick = () => {
-    if (stage === 3 && paymentState !== "processing") {
-      handleClose();
-    }
-  };
-
   return (
     <div
       className={`fixed inset-0 z-50 flex items-center justify-center ${
         isClosing ? "animate-fade-out pointer-events-none" : ""
       }`}
-      onClick={handleBackdropClick}
+      onClick={step === "sent" ? handleClose : undefined}
     >
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
-
       {/* Modal card */}
       <div
         className={`relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border p-8 ${
@@ -2483,452 +2683,116 @@ function BookingModal({
         }`}
         style={{ backgroundColor: "var(--aura-card, #1A1A1A)" }}
       >
-        {stage === 1 && <Stage1Securing serviceName={service.title} />}
-        {stage === 2 && (
-          <Stage2Escrow service={service} activeProperty={activeProperty} />
-        )}
-        {stage === 3 && isPriced && (
-          <Stage3Checkout
-            service={service}
-            paymentState={paymentState}
-            paymentRef={paymentRef}
-            onPayNow={handlePayNow}
-            onClose={handleClose}
-          />
-        )}
-        {stage === 3 && !isPriced && (
-          <Stage3Requested
-            service={service}
-            activeProperty={activeProperty}
-            onClose={handleClose}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Stage 1: Securing Booking ─────────────────────────────────────────────────
-
-function Stage1Securing({ serviceName }: { serviceName: string }) {
-  return (
-    <div className="flex flex-col items-center space-y-6 text-center">
-      {/* Pulsing gold ring */}
-      <div className="relative flex h-16 w-16 items-center justify-center">
-        <div className="animate-escrow-pulse absolute inset-0 rounded-full" />
-        <div
-          className="relative flex h-12 w-12 items-center justify-center rounded-full border-2"
-          style={{ borderColor: "var(--aura-accent, #D4AF37)" }}
-        >
-          {/* Shield icon */}
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          </svg>
-        </div>
-      </div>
-
-      <div>
-        <p className="text-lg font-light tracking-wide text-text-primary">
-          Securing Booking
-        </p>
-        <p
-          className="mt-1 text-sm font-light"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          via AURA Vault Protection...
-        </p>
-      </div>
-
-      <p
-        className="rounded-full border border-[var(--aura-border-accent,rgba(212,175,55,0.3))] px-4 py-1.5 text-xs font-light tracking-wide"
-        style={{ color: "var(--aura-accent, #D4AF37)" }}
-      >
-        {serviceName}
-      </p>
-    </div>
-  );
-}
-
-// ── Stage 2: Escrow Details ───────────────────────────────────────────────────
-
-function Stage2Escrow({
-  service,
-  activeProperty,
-}: {
-  service: ConciergeService;
-  activeProperty: Property;
-}) {
-  const isPriced = service.priceValue !== null;
-  const amount = service.priceValue ?? 0;
-  const auraFee = Math.round(amount * 0.03);
-  const agencyShare = Math.round(amount * 0.12);
-  const vendorPayout = Math.round(amount * 0.85);
-  return (
-    <div className="animate-fade-in-up space-y-5">
-      <h3
-        className="text-center text-lg font-light tracking-wide"
-        style={{ color: "var(--aura-accent, #D4AF37)" }}
-      >
-        Escrow Details
-      </h3>
-      {/* Property the request is raised for */}
-      <p className="text-center text-[11px] font-light tracking-[0.15em] text-text-muted">
-        Richiesta per Villa {activeProperty.refCode}
-      </p>
-
-      {/* Transaction Amount */}
-      <div className="rounded-xl border border-border p-4">
-        <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted">
-          Transaction Amount
-        </p>
-        <p
-          className="mt-2 text-2xl font-light tracking-wide"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          {service.price}
-        </p>
-      </div>
-
-      {/* Secure Escrow Hold badge */}
-      <div
-        className="flex items-center gap-3 rounded-xl border p-4"
-        style={{
-          borderColor: "var(--aura-accent, #D4AF37)",
-          backgroundColor: "var(--aura-accent-subtle, rgba(212,175,55,0.08))",
-        }}
-      >
-        {/* Shield + lock icon */}
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{ color: "var(--aura-accent, #D4AF37)", flexShrink: 0 }}
-        >
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          <circle cx="12" cy="16" r="1" />
-        </svg>
-        <span
-          className="text-sm font-medium tracking-wide"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          Secure Escrow Hold Active
-        </span>
-      </div>
-
-      {/* System log — fee breakdown */}
-      <div
-        className="rounded-lg border border-border/40 p-3"
-        style={{ backgroundColor: "rgba(11,11,11,0.6)" }}
-      >
-        {isPriced ? (
-          <div className="space-y-1.5 font-mono text-[11px] font-light leading-relaxed tracking-wide">
-            <div className="flex items-center justify-between gap-4 text-text-muted">
-              <span>Transaction Amount</span>
-              <span className="text-text-primary">{formatCurrency(amount)}</span>
+        {step === "details" ? (
+          <div className="animate-fade-in-up flex flex-col space-y-6">
+            <div className="flex flex-col items-center space-y-3 text-center">
+              <div
+                className="flex h-14 w-14 items-center justify-center rounded-full border-2"
+                style={{
+                  borderColor: "var(--aura-accent, #D4AF37)",
+                  color: "var(--aura-accent, #D4AF37)",
+                }}
+              >
+                <ServiceIcon type={service.icon} />
+              </div>
+              <p
+                className="text-xl font-light tracking-wide"
+                style={{ color: "var(--aura-accent, #D4AF37)" }}
+              >
+                {service.title}
+              </p>
+              <p className="text-sm font-light text-text-secondary">
+                {service.subtitle}
+              </p>
             </div>
-            <div className="flex items-center justify-between gap-4 text-text-muted">
-              <span>AURA Platform Fee (3%)</span>
-              <span style={{ color: "var(--aura-accent, #D4AF37)" }}>{formatCurrency(auraFee)}</span>
+
+            <div
+              className="w-full rounded-xl border border-border p-4"
+              style={{ backgroundColor: "rgba(11,11,11,0.6)" }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted">
+                  Price
+                </span>
+                <span className="text-xs font-light tracking-wide text-text-secondary">
+                  {service.price}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center justify-between">
+                <span className="text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted">
+                  Property
+                </span>
+                <span className="text-xs font-light tracking-wide text-text-secondary">
+                  {activeProperty.name}
+                </span>
+              </div>
+              <p className="mt-3 text-[10px] font-light leading-relaxed text-text-muted/60">
+                Indicative only — our staff confirm availability and the final
+                price with you.
+              </p>
             </div>
-            <div className="flex items-center justify-between gap-4 text-text-muted">
-              <span>Agency Commission (12%)</span>
-              <span className="text-text-primary">{formatCurrency(agencyShare)}</span>
-            </div>
-            <div className="flex items-center justify-between gap-4 text-text-muted">
-              <span>Vendor Payout (85%)</span>
-              <span className="text-text-primary">{formatCurrency(vendorPayout)}</span>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleClose}
+                className="flex-1 cursor-pointer rounded-lg border border-border px-4 py-3 text-sm font-light tracking-wider text-text-secondary transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-[var(--aura-accent,#D4AF37)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendRequest}
+                className="flex-1 cursor-pointer rounded-lg border border-[var(--aura-accent,#D4AF37)] px-4 py-3 text-sm font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-all duration-300 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
+              >
+                Send request
+              </button>
             </div>
           </div>
         ) : (
-          <p className="font-mono text-[11px] font-light leading-relaxed tracking-wide text-text-muted">
-            Custom Quote — fees calculated at confirmation
-          </p>
-        )}
-        <p className="mt-1.5 font-mono text-[10px] tracking-wide text-text-muted/50">
-          Mock escrow — no real funds are held
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ── Stage 3: Confirmed ────────────────────────────────────────────────────────
-
-// ── Stage 3: Mock Checkout ────────────────────────────────────────────────────
-
-function Stage3Checkout({
-  service,
-  paymentState,
-  paymentRef,
-  onPayNow,
-  onClose,
-}: {
-  service: ConciergeService;
-  paymentState: "idle" | "processing" | "paid";
-  paymentRef: string;
-  onPayNow: () => void;
-  onClose: () => void;
-}) {
-  // Paid state — success screen with mock payment reference
-  if (paymentState === "paid") {
-    return (
-      <div className="animate-fade-in-up flex flex-col items-center space-y-6 text-center">
-        {/* Gold checkmark with pop animation */}
-        <div className="animate-check-pop flex h-16 w-16 items-center justify-center rounded-full bg-[var(--aura-accent,#D4AF37)]">
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#0B0B0B"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </div>
-
-        <div>
-          <p
-            className="text-xl font-light tracking-wide"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            Payment Successful
-          </p>
-          <p className="mt-2 text-sm font-light text-text-secondary">
-            {service.title}
-          </p>
-        </div>
-
-        {/* Mock payment reference */}
-        <div
-          className="w-full rounded-xl border border-border/40 p-4"
-          style={{ backgroundColor: "rgba(11,11,11,0.6)" }}
-        >
-          <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted">
-            Mock Payment Reference
-          </p>
-          <p
-            className="mt-1.5 font-mono text-sm tracking-wider"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            {paymentRef}
-          </p>
-          <p className="mt-1 text-[10px] font-light text-text-muted/60">
-            Simulated transaction — no real funds were collected
-          </p>
-        </div>
-
-        <button
-          onClick={onClose}
-          className="mt-2 cursor-pointer rounded-lg border border-[var(--aura-accent,#D4AF37)] px-6 py-3 text-sm font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-all duration-300 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
-        >
-          Close
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="animate-fade-in-up flex flex-col items-center space-y-6 text-center">
-      {/* AURA Vault badge */}
-      <div
-        className="flex h-14 w-14 items-center justify-center rounded-full border-2"
-        style={{ borderColor: "var(--aura-accent, #D4AF37)" }}
-      >
-        <svg
-          width="18"
-          height="18"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          <circle cx="12" cy="16" r="1" />
-        </svg>
-      </div>
-
-      <div>
-        <p className="text-lg font-light tracking-wide text-text-primary">
-          Checkout
-        </p>
-        <p className="mt-1 text-sm font-light text-text-secondary">
-          {service.title}
-        </p>
-      </div>
-
-      {/* Amount due */}
-      <div className="w-full rounded-xl border border-border p-4">
-        <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted">
-          Amount Due
-        </p>
-        <p
-          className="mt-2 text-3xl font-light tracking-wide"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          {formatCurrency(service.priceValue ?? 0)}
-        </p>
-        <p className="mt-1 text-[11px] font-light text-text-muted/60">
-          {service.price}
-        </p>
-      </div>
-
-      {/* AURA Vault payment badge */}
-      <div
-        className="flex w-full items-center justify-center gap-2 rounded-xl border p-3"
-        style={{
-          borderColor: "var(--aura-border-accent, rgba(212,175,55,0.3))",
-          backgroundColor: "var(--aura-accent-subtle, rgba(212,175,55,0.08))",
-        }}
-      >
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{ color: "var(--aura-accent, #D4AF37)", flexShrink: 0 }}
-        >
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-        </svg>
-        <span
-          className="text-xs font-medium uppercase tracking-[0.15em]"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          Secured by AURA Vault
-        </span>
-      </div>
-
-      {/* Pay Now / Processing */}
-      {paymentState === "processing" ? (
-        <div className="flex w-full flex-col items-center space-y-3">
-          <div className="flex items-center gap-3">
-            <span className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--aura-accent,#D4AF37)] border-t-transparent" />
-            <p className="text-sm font-light text-text-secondary">
-              Processing payment...
+          <div className="animate-fade-in-up flex flex-col items-center space-y-6 text-center">
+            <div className="animate-check-pop flex h-16 w-16 items-center justify-center rounded-full bg-[var(--aura-accent,#D4AF37)]">
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#0B0B0B"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </div>
+            <div>
+              <p
+                className="text-xl font-light tracking-wide"
+                style={{ color: "var(--aura-accent, #D4AF37)" }}
+              >
+                Request sent
+              </p>
+              <p className="mt-2 text-sm font-light text-text-secondary">
+                {service.title}
+              </p>
+            </div>
+            <p className="text-xs font-light leading-relaxed text-text-secondary">
+              I've sent your request to our staff. You'll see the status here
+              once it's confirmed.
             </p>
+            <p className="text-[10px] font-light text-text-muted/60">
+              Follow the status under Services → Your Requests.
+            </p>
+            <button
+              onClick={handleClose}
+              className="mt-2 cursor-pointer rounded-lg border border-[var(--aura-accent,#D4AF37)] px-6 py-3 text-sm font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-all duration-300 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
+            >
+              Close
+            </button>
           </div>
-          <p className="text-[10px] font-light text-text-muted/60">
-            Mock checkout — no real funds move
-          </p>
-        </div>
-      ) : (
-        <>
-          <button
-            onClick={onPayNow}
-            className="w-full cursor-pointer rounded-lg bg-[var(--aura-accent,#D4AF37)] px-6 py-3.5 text-sm font-medium uppercase tracking-[0.15em] text-midnight transition-all duration-300 hover:brightness-110"
-          >
-            Pay Now
-          </button>
-          <button
-            onClick={onClose}
-            className="cursor-pointer text-xs font-light tracking-wide text-text-muted transition-colors hover:text-text-primary"
-          >
-            Not now
-          </button>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }
-
-// ── Stage 3 (null price): Request Submitted ───────────────────────────────────
-
-function Stage3Requested({
-  service,
-  activeProperty,
-  onClose,
-}: {
-  service: ConciergeService;
-  activeProperty: Property;
-  onClose: () => void;
-}) {
-  return (
-    <div className="animate-fade-in-up flex flex-col items-center space-y-6 text-center">
-      {/* Gold checkmark with pop animation */}
-      <div className="animate-check-pop flex h-16 w-16 items-center justify-center rounded-full bg-[var(--aura-accent,#D4AF37)]">
-        <svg
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="#0B0B0B"
-          strokeWidth="3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      </div>
-
-      <div>
-        <p
-          className="text-xl font-light tracking-wide"
-          style={{ color: "var(--aura-accent, #D4AF37)" }}
-        >
-          Request Submitted
-        </p>
-        <p className="mt-2 text-sm font-light text-text-secondary">
-          {service.title} — {service.price}
-        </p>
-      </div>
-
-      {/* Property the request is raised for */}
-      <p className="text-[11px] font-light tracking-[0.15em] text-text-muted">
-        Richiesta per Villa {activeProperty.refCode}
-      </p>
-      <div
-        className="w-full rounded-xl border border-border/40 p-4"
-        style={{ backgroundColor: "rgba(11,11,11,0.6)" }}
-      >
-        <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted">
-          Custom Quote
-        </p>
-        <p className="mt-1.5 text-sm font-light text-text-secondary">
-          Your concierge will provide a tailored quote shortly
-        </p>
-      </div>
-
-      <button
-        onClick={onClose}
-        className="mt-2 cursor-pointer rounded-lg border border-[var(--aura-accent,#D4AF37)] px-6 py-3 text-sm font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-all duration-300 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
-      >
-        Close
-      </button>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// REVENUE PANEL — Agency Revenue Analytics Dashboard
-// ═══════════════════════════════════════════════════════════════════════════════
-
 interface RevenueTransaction {
   id: string;
   service: string;
