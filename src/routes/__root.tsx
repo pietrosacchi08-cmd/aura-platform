@@ -23,7 +23,7 @@ export const Route = createRootRoute({
         content: "black-translucent",
       },
       { name: "apple-mobile-web-app-title", content: "AURA" },
-      { title: "AURA — Exclusive Concierge Experience" },
+      { title: "AURA - Concierge platform for luxury villa agencies" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },
