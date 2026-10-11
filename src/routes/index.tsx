@@ -2862,7 +2862,6 @@ function RevenuePanel({
   const approvedRows = rows.filter((r) => r.status === "approved");
   const totalClientSpend = totals.guestPrice;
   const totalPlatformRevenue = approvedRows.reduce((sum, r) => sum + r.split.auraFee, 0);
-  const totalAuraFees = totals.auraFee;
   const totalAgencyCommissions = totals.agencyCommission;
   // Worked example shown in the "How this is calculated" block, taken from the
   // first rendered row (so it can never drift from the real figures).
