@@ -579,6 +579,7 @@ function TabPanels({
   requestsStorageError,
   onCreateRequest,
   onUpdateRequestStatus,
+  onUpdateRequest,
   onRetryRequests,
 }: {
   activeTab: Tab;
