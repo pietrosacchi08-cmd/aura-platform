@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import type { RefObject } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { properties, type Property } from "../data/properties";
@@ -8,6 +8,7 @@ import {
   conciergeImages,
   conciergeServices,
   revenueConfig,
+  splitRequestAmounts,
   subscriptionPrice,
   type ConciergeService,
 } from "../data/config";
@@ -50,12 +51,26 @@ type GuestRequestStatus =
   | "confirmed"
   | "completed"
   | "cancelled";
+// Money fields below are RECORDED amounts only — AURA never moves money.
+// Derived amounts (agency / AURA / supplier) are never stored: they are
+// computed from `price` + the two percentages with splitRequestAmounts.
 interface GuestRequest {
   id: string;
-  serviceTitle: string;
-  property: string;
-  createdAt: string;
+  guestName: string;
+  villaName: string;
+  serviceType: string;
+  details: string;
   status: GuestRequestStatus;
+  /** Recorded price, or null while no price has been set. */
+  price: number | null;
+  /** Agency share of the price, in percent (default from revenueConfig). */
+  agencyPct: number;
+  /** AURA share of the price, in percent (default from revenueConfig). */
+  auraPct: number;
+  /** Free-text note written by the staff for this request. */
+  staffNote: string;
+  createdAt: string;
+  updatedAt: string;
 }
 // Ordered lifecycle shown to the guest as a timeline.
 const GUEST_REQUEST_STEPS: Array<Exclude<GuestRequestStatus, "cancelled">> = [
@@ -71,6 +86,63 @@ const GUEST_REQUEST_LABELS: Record<GuestRequestStatus, string> = {
   completed: "Completed",
   cancelled: "Cancelled",
 };
+const GUEST_REQUEST_STATUSES: GuestRequestStatus[] = [
+  "received",
+  "in_progress",
+  "confirmed",
+  "completed",
+  "cancelled",
+];
+/**
+ * Normalise one persisted row to the current GuestRequest shape.
+ * Legacy rows (written before the field rename) carried `serviceTitle` /
+ * `property` and none of the money or note fields; they are upgraded with
+ * defaults. Rows with no id or an unknown status are dropped (return null).
+ */
+function normalizeGuestRequest(raw: unknown): GuestRequest | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const id = typeof row.id === "string" && row.id ? row.id : null;
+  const status =
+    typeof row.status === "string" && row.status in GUEST_REQUEST_LABELS
+      ? (row.status as GuestRequestStatus)
+      : null;
+  if (!id || !status) return null;
+  const legacy = raw as { serviceTitle?: unknown; property?: unknown };
+  const serviceType =
+    typeof row.serviceType === "string"
+      ? row.serviceType
+      : typeof legacy.serviceTitle === "string"
+        ? legacy.serviceTitle
+        : "Concierge request";
+  const villaName =
+    typeof row.villaName === "string"
+      ? row.villaName
+      : typeof legacy.property === "string"
+        ? legacy.property
+        : "—";
+  const createdAt =
+    typeof row.createdAt === "string" ? row.createdAt : new Date().toISOString();
+  const num = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  const price =
+    typeof row.price === "number" && Number.isFinite(row.price) ? row.price : null;
+  return {
+    id,
+    guestName:
+      typeof row.guestName === "string" && row.guestName ? row.guestName : "Guest",
+    villaName,
+    serviceType,
+    details: typeof row.details === "string" ? row.details : "",
+    status,
+    price,
+    agencyPct: num(row.agencyPct, revenueConfig.agencyCommissionPct),
+    auraPct: num(row.auraPct, revenueConfig.auraFeePct),
+    staffNote: typeof row.staffNote === "string" ? row.staffNote : "",
+    createdAt,
+    updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : createdAt,
+  };
+}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -189,12 +261,20 @@ function Home() {
   );
 
   // ── Guest requests — request lifecycle for this device ─────────────────────
+  // MOCK / DEMO DATA LAYER: requests live in React state and are mirrored to
+  // this browser's localStorage ("aura-guest-requests") — there is no server,
+  // database or sync behind it. Swapping in a real backend is contained here:
+  // the UI only ever reads state and calls the handlers below.
   const [guestRequests, setGuestRequests] = useState<GuestRequest[]>(() => {
     try {
       const stored = localStorage.getItem("aura-guest-requests");
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed as GuestRequest[];
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map(normalizeGuestRequest)
+            .filter((r): r is GuestRequest => r !== null);
+        }
       }
     } catch { /* ignore */ }
     return [];
@@ -210,32 +290,54 @@ function Home() {
   }, [guestRequests]);
 
   const handleCreateRequest = useCallback(
-    (serviceTitle: string) => {
+    (serviceType: string, guestName = "Guest", details = "") => {
+      const now = new Date().toISOString();
       const request: GuestRequest = {
         id: `gr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        serviceTitle,
-        property: properties.find((p) => p.id === activePropertyId)?.name ?? "—",
-        createdAt: new Date().toISOString(),
+        guestName,
+        villaName: properties.find((p) => p.id === activePropertyId)?.name ?? "—",
+        serviceType,
+        details,
         status: "received",
+        price: null,
+        agencyPct: revenueConfig.agencyCommissionPct,
+        auraPct: revenueConfig.auraFeePct,
+        staffNote: "",
+        createdAt: now,
+        updatedAt: now,
       };
       setGuestRequests((prev) => [request, ...prev]);
     },
     [activePropertyId, properties],
   );
 
-  const handleUpdateRequestStatus = useCallback(
-    (id: string, status: GuestRequestStatus) => {
+  // Every edit stamps updatedAt, so the staff list shows when a request moved.
+  const handleUpdateRequest = useCallback(
+    (id: string, patch: Partial<GuestRequest>) => {
       setGuestRequests((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, status } : r)),
+        prev.map((r) =>
+          r.id === id ? { ...r, ...patch, updatedAt: new Date().toISOString() } : r,
+        ),
       );
     },
     [],
+  );
+  const handleUpdateRequestStatus = useCallback(
+    (id: string, status: GuestRequestStatus) => {
+      handleUpdateRequest(id, { status });
+    },
+    [handleUpdateRequest],
   );
 
   const handleRetryRequests = useCallback(() => {
     try {
       const stored = localStorage.getItem("aura-guest-requests");
-      setGuestRequests(stored ? (JSON.parse(stored) as GuestRequest[]) : []);
+      const parsed = stored ? JSON.parse(stored) : [];
+      setGuestRequests(
+        Array.isArray(parsed)
+          ? parsed.map(normalizeGuestRequest).filter((r): r is GuestRequest => r !== null)
+          : [],
+      );
       setRequestsStorageError(false);
     } catch { setRequestsStorageError(true); }
   }, []);
@@ -284,6 +386,7 @@ function Home() {
         guestRequests={guestRequests}
         requestsStorageError={requestsStorageError}
         onCreateRequest={handleCreateRequest}
+        onUpdateRequest={handleUpdateRequest}
         onUpdateRequestStatus={handleUpdateRequestStatus}
         onRetryRequests={handleRetryRequests}
       />
@@ -476,6 +579,7 @@ function TabPanels({
   requestsStorageError,
   onCreateRequest,
   onUpdateRequestStatus,
+  onUpdateRequest,
   onRetryRequests,
 }: {
   activeTab: Tab;
@@ -489,7 +593,8 @@ function TabPanels({
   revenueTransactions: RevenueTransaction[];
   guestRequests: GuestRequest[];
   requestsStorageError: boolean;
-  onCreateRequest: (serviceTitle: string) => void;
+  onCreateRequest: (serviceType: string) => void;
+  onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
 }) {
@@ -533,7 +638,10 @@ function TabPanels({
                   tasks={tasks}
                   setTasks={setTasks}
                   guestRequests={guestRequests}
+                  requestsStorageError={requestsStorageError}
+                  onUpdateRequest={onUpdateRequest}
                   onUpdateRequestStatus={onUpdateRequestStatus}
+                  onRetryRequests={onRetryRequests}
                 />
               ) : tab.id === "revenue" ? (
                 <RevenuePanel revenueTransactions={revenueTransactions} activeProperty={activeProperty} />
@@ -1255,7 +1363,7 @@ function ConciergePanel({
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
-  onCreateRequest: (serviceTitle: string) => void;
+  onCreateRequest: (serviceType: string) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
@@ -1835,12 +1943,18 @@ function StaffPanel({
   tasks,
   setTasks,
   guestRequests,
+  requestsStorageError,
+  onUpdateRequest,
   onUpdateRequestStatus,
+  onRetryRequests,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
   guestRequests: GuestRequest[];
+  requestsStorageError: boolean;
+  onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+  onRetryRequests: () => void;
 }) {
   const completedCount = tasks.filter(
     (t) => t.status === "confirmed" || t.status === "completed",
@@ -1899,62 +2013,465 @@ function StaffPanel({
         onAssignTask={handleAssignTask}
       />
 
-      {/* Guest Requests — staff move a request along its lifecycle */}
-      {guestRequests.length > 0 && (
-        <div className="mt-8 border-t border-border pt-6">
-          <h3
-            className="text-xs font-medium uppercase tracking-[0.15em]"
-            style={{ color: "var(--aura-accent, #D4AF37)" }}
-          >
-            Guest Requests
-          </h3>
-          <p className="mt-1 text-xs font-light text-text-muted">
-            Advance a request once it has been confirmed with the guest.
+      {/* Requests — staff-side request management (list + inline editor) */}
+      <StaffRequestsSection
+        guestRequests={guestRequests}
+        requestsStorageError={requestsStorageError}
+        onUpdateRequest={onUpdateRequest}
+        onUpdateRequestStatus={onUpdateRequestStatus}
+        onRetryRequests={onRetryRequests}
+      />
+    </div>
+  );
+}
+
+// ── Staff Requests — filterable list with an inline detail editor ─────────────
+type RequestFilter = GuestRequestStatus | "all";
+const REQUEST_FILTERS: RequestFilter[] = ["all", ...GUEST_REQUEST_STATUSES];
+
+function formatRequestAmount(value: number | null): string {
+  if (value === null) return "—";
+  return `€ ${value.toLocaleString("en-GB", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+function formatRequestStamp(iso: string): string {
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) return iso;
+  return date.toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+function requestStatusBadge(status: GuestRequestStatus): string {
+  const base =
+    "inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.12em]";
+  return status === "cancelled"
+    ? `${base} border-border text-text-muted`
+    : `${base} border-[var(--aura-accent,#D4AF37)] text-[var(--aura-accent,#D4AF37)]`;
+}
+const requestInputClass =
+  "w-full rounded-lg border border-border bg-transparent px-3 py-2 text-xs font-light text-text-primary outline-none transition-colors duration-200 focus:border-[var(--aura-accent,#D4AF37)]";
+const requestLabelClass =
+  "text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted";
+
+function StaffRequestsSection({
+  guestRequests,
+  requestsStorageError,
+  onUpdateRequest,
+  onUpdateRequestStatus,
+  onRetryRequests,
+}: {
+  guestRequests: GuestRequest[];
+  requestsStorageError: boolean;
+  onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
+  onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+  onRetryRequests: () => void;
+}) {
+  const [filter, setFilter] = useState<RequestFilter>("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Newest first — a request that just came in sits at the top of the list.
+  const sorted = useMemo(
+    () =>
+      [...guestRequests].sort((a, b) =>
+        a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+      ),
+    [guestRequests],
+  );
+  const counts = useMemo(() => {
+    const acc: Record<RequestFilter, number> = {
+      all: guestRequests.length,
+      received: 0,
+      in_progress: 0,
+      confirmed: 0,
+      completed: 0,
+      cancelled: 0,
+    };
+    for (const request of guestRequests) acc[request.status] += 1;
+    return acc;
+  }, [guestRequests]);
+  const rows = filter === "all" ? sorted : sorted.filter((r) => r.status === filter);
+
+  return (
+    <div className="mt-8 border-t border-border pt-6">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3
+          className="text-xs font-medium uppercase tracking-[0.15em]"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          Requests
+        </h3>
+        <span className="text-[10px] font-light text-text-muted">
+          {counts.all} total
+        </span>
+      </div>
+      <p className="mt-1 text-xs font-light text-text-muted">
+        Recorded requests from guests. Amounts are recorded only — nothing is
+        charged in the app.
+      </p>
+      {/* Status filter */}
+      <div className="mt-4 flex flex-wrap gap-2">
+        {REQUEST_FILTERS.map((key) => {
+          const isActive = filter === key;
+          return (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              className={`cursor-pointer rounded-full border px-3 py-1 text-[10px] font-medium uppercase tracking-[0.12em] transition-colors duration-200 ${
+                isActive
+                  ? "bg-[var(--aura-accent,#D4AF37)] text-midnight"
+                  : "text-text-secondary hover:text-[var(--aura-accent,#D4AF37)]"
+              }`}
+              style={{
+                borderColor: isActive
+                  ? "var(--aura-accent, #D4AF37)"
+                  : "var(--color-border, #2A2A2A)",
+              }}
+            >
+              {key === "all" ? "All" : GUEST_REQUEST_LABELS[key]} ({counts[key]})
+            </button>
+          );
+        })}
+      </div>
+      {requestsStorageError && (
+        <div
+          className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <p className="text-xs font-light text-text-secondary">
+            We couldn't load your requests. Please try again.
           </p>
-          <div className="mt-4 space-y-3">
-            {guestRequests.map((request) => (
-              <div
-                key={request.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border px-4 py-3"
-                style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
-              >
-                <div className="min-w-0">
-                  <p className="text-xs font-medium tracking-wide text-text-primary">
-                    {request.serviceTitle}
-                  </p>
-                  <p className="mt-0.5 text-[10px] font-light text-text-muted">
-                    {request.property} · {GUEST_REQUEST_LABELS[request.status]}
-                  </p>
-                </div>
-                <select
-                  value={request.status}
-                  onChange={(e) =>
-                    onUpdateRequestStatus(
-                      request.id,
-                      e.target.value as GuestRequestStatus,
-                    )
-                  }
-                  className="cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-[10px] font-light tracking-wide text-text-secondary outline-none"
-                >
-                  {(
-                    [
-                      "received",
-                      "in_progress",
-                      "confirmed",
-                      "completed",
-                      "cancelled",
-                    ] as GuestRequestStatus[]
-                  ).map((s) => (
-                    <option key={s} value={s} className="bg-charcoal text-text-primary">
-                      {GUEST_REQUEST_LABELS[s]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
-          </div>
+          <button
+            onClick={onRetryRequests}
+            className="cursor-pointer rounded-md border border-[var(--aura-accent,#D4AF37)] px-3 py-1 text-[11px] font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-colors duration-200 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
+          >
+            Retry
+          </button>
         </div>
       )}
+      {guestRequests.length === 0 ? (
+        <div
+          className="mt-4 rounded-2xl border border-border px-6 py-8 text-center"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <p className="text-sm font-light text-text-primary">No requests yet</p>
+          <p className="mt-1 text-xs font-light text-text-muted">
+            Requests from guests will appear here.
+          </p>
+        </div>
+      ) : rows.length === 0 ? (
+        <div
+          className="mt-4 rounded-2xl border border-border px-6 py-6 text-center"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <p className="text-xs font-light text-text-muted">
+            No requests with this status.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {rows.map((request) => (
+            <StaffRequestRow
+              key={request.id}
+              request={request}
+              isExpanded={expandedId === request.id}
+              onToggle={() =>
+                setExpandedId(expandedId === request.id ? null : request.id)
+              }
+              onUpdateRequest={onUpdateRequest}
+              onUpdateRequestStatus={onUpdateRequestStatus}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StaffRequestRow({
+  request,
+  isExpanded,
+  onToggle,
+  onUpdateRequest,
+  onUpdateRequestStatus,
+}: {
+  request: GuestRequest;
+  isExpanded: boolean;
+  onToggle: () => void;
+  onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
+  onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+}) {
+  return (
+    <div
+      className="overflow-hidden rounded-xl border border-border"
+      style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+    >
+      <button
+        onClick={onToggle}
+        aria-expanded={isExpanded}
+        className="flex w-full cursor-pointer items-start justify-between gap-3 px-4 py-3 text-left transition-colors duration-200 hover:bg-white/5"
+      >
+        <div className="min-w-0">
+          <p className="truncate text-xs font-medium tracking-wide text-text-primary">
+            {request.guestName}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] font-light text-text-secondary">
+            {request.serviceType}
+          </p>
+          <p className="mt-0.5 truncate text-[10px] font-light text-text-muted">
+            {request.villaName}
+          </p>
+          <p className="mt-1 text-[10px] font-light text-text-muted">
+            Updated {formatRequestStamp(request.updatedAt)}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <span className={requestStatusBadge(request.status)}>
+            {GUEST_REQUEST_LABELS[request.status]}
+          </span>
+          <span className="text-[11px] font-light tracking-wide text-text-secondary">
+            {formatRequestAmount(request.price)}
+          </span>
+          <span
+            className="text-[9px]"
+            style={{ color: "var(--aura-accent, #D4AF37)" }}
+          >
+            {isExpanded ? "▲" : "▼"}
+          </span>
+        </div>
+      </button>
+      {isExpanded && (
+        <div className="animate-fade-in border-t border-border px-4 py-4">
+          <StaffRequestEditor
+            request={request}
+            onUpdateRequest={onUpdateRequest}
+            onUpdateRequestStatus={onUpdateRequestStatus}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Detail editor — every field here only RECORDS data; nothing is charged.
+function StaffRequestEditor({
+  request,
+  onUpdateRequest,
+  onUpdateRequestStatus,
+}: {
+  request: GuestRequest;
+  onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
+  onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+}) {
+  // Local strings so a half-typed value ("12.") never fights the stored number.
+  const [priceInput, setPriceInput] = useState(
+    request.price === null ? "" : String(request.price),
+  );
+  const [agencyInput, setAgencyInput] = useState(String(request.agencyPct));
+  const [auraInput, setAuraInput] = useState(String(request.auraPct));
+  const [note, setNote] = useState(request.staffNote);
+
+  const parsedPrice = priceInput.trim() === "" ? null : Number(priceInput);
+  const price =
+    parsedPrice !== null && Number.isFinite(parsedPrice) && parsedPrice >= 0
+      ? parsedPrice
+      : null;
+  const clampPct = (value: string): number => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(100, Math.max(0, n));
+  };
+  const agencyPct = clampPct(agencyInput);
+  const auraPct = clampPct(auraInput);
+  // The supplier share is the remainder, so the two percentages may never sum
+  // above 100 — such a pair is shown but not committed, with a hint below.
+  const pctOverflow = agencyPct + auraPct > 100;
+  const showSplit = price !== null && price > 0 && !pctOverflow;
+  const split = splitRequestAmounts(price, agencyPct, auraPct);
+
+  const updatePrice = (value: string) => {
+    setPriceInput(value);
+    if (value.trim() === "") {
+      onUpdateRequest(request.id, { price: null });
+      return;
+    }
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) onUpdateRequest(request.id, { price: n });
+  };
+  const updatePct = (nextAgency: number, nextAura: number) => {
+    if (nextAgency + nextAura > 100) return;
+    onUpdateRequest(request.id, { agencyPct: nextAgency, auraPct: nextAura });
+  };
+
+  return (
+    <div className="space-y-4">
+      {request.details && (
+        <p className="text-[11px] font-light text-text-secondary">
+          {request.details}
+        </p>
+      )}
+      {/* Status — this is what the guest timeline follows */}
+      <div>
+        <p className={requestLabelClass}>Status</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {GUEST_REQUEST_STATUSES.map((status) => {
+            const isActive = request.status === status;
+            return (
+              <button
+                key={status}
+                onClick={() => onUpdateRequestStatus(request.id, status)}
+                className={`cursor-pointer rounded-full border px-3 py-1 text-[10px] font-medium uppercase tracking-[0.12em] transition-colors duration-200 ${
+                  isActive
+                    ? "bg-[var(--aura-accent,#D4AF37)] text-midnight"
+                    : "text-text-secondary hover:text-[var(--aura-accent,#D4AF37)]"
+                }`}
+                style={{
+                  borderColor: isActive
+                    ? "var(--aura-accent, #D4AF37)"
+                    : "var(--color-border, #2A2A2A)",
+                }}
+              >
+                {GUEST_REQUEST_LABELS[status]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="col-span-2">
+          <label className={requestLabelClass} htmlFor={`request-price-${request.id}`}>
+            Price (EUR)
+          </label>
+          <input
+            id={`request-price-${request.id}`}
+            type="number"
+            min={0}
+            step="0.01"
+            inputMode="decimal"
+            value={priceInput}
+            onChange={(e) => updatePrice(e.target.value)}
+            placeholder="—"
+            className={`mt-1.5 ${requestInputClass}`}
+          />
+        </div>
+        <div>
+          <label className={requestLabelClass} htmlFor={`request-agency-${request.id}`}>
+            Agency %
+          </label>
+          <input
+            id={`request-agency-${request.id}`}
+            type="number"
+            min={0}
+            max={100}
+            step="0.5"
+            inputMode="decimal"
+            value={agencyInput}
+            onChange={(e) => {
+              setAgencyInput(e.target.value);
+              updatePct(clampPct(e.target.value), auraPct);
+            }}
+            className={`mt-1.5 ${requestInputClass}`}
+          />
+        </div>
+        <div>
+          <label className={requestLabelClass} htmlFor={`request-aura-${request.id}`}>
+            AURA %
+          </label>
+          <input
+            id={`request-aura-${request.id}`}
+            type="number"
+            min={0}
+            max={100}
+            step="0.5"
+            inputMode="decimal"
+            value={auraInput}
+            onChange={(e) => {
+              setAuraInput(e.target.value);
+              updatePct(agencyPct, clampPct(e.target.value));
+            }}
+            className={`mt-1.5 ${requestInputClass}`}
+          />
+        </div>
+      </div>
+      {pctOverflow && (
+        <p
+          className="text-[10px] font-light"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          Agency % + AURA % must stay at or below 100 — the supplier share is the
+          remainder.
+        </p>
+      )}
+      {/* Derived amounts — computed live from price + percentages, never stored */}
+      {showSplit && split.agencyAmount !== null ? (
+        <div
+          className="rounded-lg border border-border px-3 py-3"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <div className="flex items-center justify-between text-[11px] font-light">
+            <span className="text-text-secondary">Recorded price</span>
+            <span className="tracking-wide text-text-primary">
+              {formatRequestAmount(price)}
+            </span>
+          </div>
+          <div className="mt-2 space-y-1.5 border-t border-border pt-2">
+            <div className="flex items-center justify-between text-[11px] font-light">
+              <span className="text-text-muted">Supplier (remainder)</span>
+              <span
+                className="tracking-wide"
+                style={{ color: "var(--aura-accent, #D4AF37)" }}
+              >
+                {formatRequestAmount(split.supplierAmount)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[11px] font-light">
+              <span className="text-text-muted">Agency ({agencyPct}%)</span>
+              <span
+                className="tracking-wide"
+                style={{ color: "var(--aura-accent, #D4AF37)" }}
+              >
+                {formatRequestAmount(split.agencyAmount)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[11px] font-light">
+              <span className="text-text-muted">AURA ({auraPct}%)</span>
+              <span
+                className="tracking-wide"
+                style={{ color: "var(--aura-accent, #D4AF37)" }}
+              >
+                {formatRequestAmount(split.auraAmount)}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <p className="text-[11px] font-light text-text-muted">
+          Set a price to see the split
+        </p>
+      )}
+      <div>
+        <label className={requestLabelClass} htmlFor={`request-note-${request.id}`}>
+          Staff note
+        </label>
+        <textarea
+          id={`request-note-${request.id}`}
+          rows={3}
+          value={note}
+          placeholder="Internal note for this request"
+          onChange={(e) => {
+            setNote(e.target.value);
+            onUpdateRequest(request.id, { staffNote: e.target.value });
+          }}
+          className={`mt-1.5 resize-none ${requestInputClass}`}
+        />
+      </div>
+      <p className="text-[10px] font-light text-text-muted">
+        Created {formatRequestStamp(request.createdAt)} · Updated{" "}
+        {formatRequestStamp(request.updatedAt)}
+      </p>
     </div>
   );
 }
@@ -2312,7 +2829,7 @@ function ServicesPanel({
   activeProperty: Property;
   guestRequests: GuestRequest[];
   requestsStorageError: boolean;
-  onCreateRequest: (serviceTitle: string) => void;
+  onCreateRequest: (serviceType: string) => void;
   onRetryRequests: () => void;
 }) {
   const [bookingService, setBookingService] = useState<ConciergeService | null>(null);
@@ -2416,10 +2933,10 @@ function GuestRequestCard({ request }: { request: GuestRequest }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium tracking-wide text-text-primary">
-            {request.serviceTitle}
+            {request.serviceType}
           </p>
           <p className="mt-1 text-xs font-light text-text-muted">
-            {request.property} · {createdLabel}
+            {request.villaName} · {createdLabel}
           </p>
         </div>
         <span
@@ -2646,7 +3163,7 @@ function BookingModal({
   activeProperty: Property;
   onClose: () => void;
   onAddTask: (task: TaskItem) => void;
-  onCreateRequest: (serviceTitle: string) => void;
+  onCreateRequest: (serviceType: string) => void;
 }) {
   const [step, setStep] = useState<"details" | "sent">("details");
   const [isClosing, setIsClosing] = useState(false);

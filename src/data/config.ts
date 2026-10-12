@@ -119,8 +119,37 @@ export function computeSplit(
   const auraFeePct = override?.auraFeePct ?? revenueConfig.auraFeePct;
   const agencyCommissionPct =
     override?.agencyCommissionPct ?? revenueConfig.agencyCommissionPct;
-  const auraFee = roundCents((guestPrice * auraFeePct) / 100);
-  const agencyCommission = roundCents((guestPrice * agencyCommissionPct) / 100);
-  const supplierShare = roundCents(guestPrice - agencyCommission - auraFee);
-  return { supplierShare, agencyCommission, auraFee };
+  const split = splitRequestAmounts(guestPrice, agencyCommissionPct, auraFeePct);
+  // guestPrice is a finite number here, so the amounts are never null.
+  return {
+    supplierShare: split.supplierAmount ?? 0,
+    agencyCommission: split.agencyAmount ?? 0,
+    auraFee: split.auraAmount ?? 0,
+  };
+}
+export interface RequestAmounts {
+  agencyAmount: number | null;
+  auraAmount: number | null;
+  supplierAmount: number | null;
+}
+/**
+ * Split a RECORDED request price into its agency / AURA / supplier amounts.
+ * These amounts are always derived, never stored: recompute them from the price
+ * and the two percentages on every render instead of persisting them.
+ * Invariant: the supplier amount is the REMAINDER (price − agency − AURA), so
+ * agencyAmount + auraAmount + supplierAmount === price exactly (rounded to
+ * cents). All three are null when no price is recorded (price === null).
+ */
+export function splitRequestAmounts(
+  price: number | null,
+  agencyPct: number,
+  auraPct: number,
+): RequestAmounts {
+  if (price === null || !Number.isFinite(price)) {
+    return { agencyAmount: null, auraAmount: null, supplierAmount: null };
+  }
+  const agencyAmount = roundCents((price * agencyPct) / 100);
+  const auraAmount = roundCents((price * auraPct) / 100);
+  const supplierAmount = roundCents(price - agencyAmount - auraAmount);
+  return { agencyAmount, auraAmount, supplierAmount };
 }
