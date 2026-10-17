@@ -2170,7 +2170,7 @@ function StaffPanel({
           Staff Operations
         </h2>
         <p className="mt-1 text-sm font-light text-text-secondary">
-          AI-generated tasks, dispatched and tracked in real time
+          Real-time guest requests, dispatched and tracked by your concierge team.
         </p>
       </div>
 
