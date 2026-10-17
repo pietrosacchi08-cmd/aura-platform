@@ -153,3 +153,83 @@ export function splitRequestAmounts(
   const supplierAmount = roundCents(price - agencyAmount - auraAmount);
   return { agencyAmount, auraAmount, supplierAmount };
 }
+
+// ── Requests CSV export ──────────────────────────────────────────────────────
+/**
+ * One row of the agency requests export. The amount fields are the DERIVED
+ * shares (splitRequestAmounts) of a RECORDED price — nothing here is stored,
+ * and nothing here moves money. A null amount exports as an empty cell, never
+ * as a placeholder.
+ */
+export interface CsvRequestRow {
+  service: string;
+  supplier: string;
+  guestPrice: number | null;
+  supplierAmount: number | null;
+  agencyAmount: number | null;
+  auraAmount: number | null;
+  status: string;
+}
+
+const CSV_HEADER = [
+  "Service",
+  "Supplier",
+  "Guest price",
+  "Supplier amount",
+  "Agency amount",
+  "AURA amount",
+  "Status",
+];
+
+/** Quote a field only when it holds a comma, a quote or a line break. */
+const csvCell = (value: string | number | null): string => {
+  if (value === null) return "";
+  const text = typeof value === "number" ? value.toFixed(2) : value;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+/**
+ * Build the full CSV for the agency requests table: a header row, one row per
+ * request, then a Total row carrying the same totals as the table footer.
+ * UTF-8 BOM + CRLF so a spreadsheet opens it in one click; numeric cells stay
+ * plain numbers with two decimals and no currency symbol so Excel reads them as
+ * numbers. Pure function — the caller turns the string into a download.
+ */
+export function toCsv(rows: CsvRequestRow[]): string {
+  const lines = [CSV_HEADER.map(csvCell).join(",")];
+  for (const row of rows) {
+    lines.push(
+      [
+        csvCell(row.service),
+        csvCell(row.supplier),
+        csvCell(row.guestPrice),
+        csvCell(row.supplierAmount),
+        csvCell(row.agencyAmount),
+        csvCell(row.auraAmount),
+        csvCell(row.status),
+      ].join(","),
+    );
+  }
+  // Totals are the sum of the exported rows; a null amount adds nothing.
+  const totals = rows.reduce(
+    (acc, row) => ({
+      guestPrice: acc.guestPrice + (row.guestPrice ?? 0),
+      supplierAmount: acc.supplierAmount + (row.supplierAmount ?? 0),
+      agencyAmount: acc.agencyAmount + (row.agencyAmount ?? 0),
+      auraAmount: acc.auraAmount + (row.auraAmount ?? 0),
+    }),
+    { guestPrice: 0, supplierAmount: 0, agencyAmount: 0, auraAmount: 0 },
+  );
+  lines.push(
+    [
+      "Total",
+      "",
+      csvCell(totals.guestPrice),
+      csvCell(totals.supplierAmount),
+      csvCell(totals.agencyAmount),
+      csvCell(totals.auraAmount),
+      "",
+    ].join(","),
+  );
+  return `\uFEFF${lines.join("\r\n")}`;
+}

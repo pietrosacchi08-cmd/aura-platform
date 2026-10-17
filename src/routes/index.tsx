@@ -10,12 +10,13 @@ import {
   revenueConfig,
   splitRequestAmounts,
   subscriptionPrice,
+  toCsv,
   type ConciergeService,
 } from "../data/config";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type Tab = "concierge" | "services" | "staff" | "revenue";
+type Tab = "concierge" | "services" | "staff" | "agency" | "revenue";
 
 interface TabDef {
   id: Tab;
@@ -69,6 +70,8 @@ interface GuestRequest {
   auraPct: number;
   /** Free-text note written by the staff for this request. */
   staffNote: string;
+  /** Assigned supplier (Suppliers screen) or null while none is assigned. */
+  supplierId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -121,6 +124,9 @@ function normalizeGuestRequest(raw: unknown): GuestRequest | null {
       : typeof legacy.property === "string"
         ? legacy.property
         : "—";
+  // Legacy rows predate supplier assignment and simply have no supplier.
+  const supplierId =
+    typeof row.supplierId === "string" && row.supplierId ? row.supplierId : null;
   const createdAt =
     typeof row.createdAt === "string" ? row.createdAt : new Date().toISOString();
   const num = (value: unknown, fallback: number): number =>
@@ -139,9 +145,75 @@ function normalizeGuestRequest(raw: unknown): GuestRequest | null {
     agencyPct: num(row.agencyPct, revenueConfig.agencyCommissionPct),
     auraPct: num(row.auraPct, revenueConfig.auraFeePct),
     staffNote: typeof row.staffNote === "string" ? row.staffNote : "",
+    supplierId,
     createdAt,
     updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : createdAt,
   };
+}
+
+// ── Suppliers ────────────────────────────────────────────────────────────────
+// The agency's own service partners. A request may point at one of them, but
+// nothing here is a payment: a supplier is a contact record, not a payee.
+interface Supplier {
+  id: string;
+  name: string;
+  serviceType: string;
+  contact: string;
+  notes: string;
+}
+
+/**
+ * Normalise one persisted supplier row. Rows with no id or no name are dropped
+ * (return null) so a corrupt entry can never render an empty card.
+ */
+function normalizeSupplier(raw: unknown): Supplier | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const id = typeof row.id === "string" && row.id ? row.id : null;
+  const name = typeof row.name === "string" ? row.name : "";
+  if (!id || !name) return null;
+  const text = (value: unknown): string => (typeof value === "string" ? value : "");
+  return {
+    id,
+    name,
+    serviceType: text(row.serviceType),
+    contact: text(row.contact),
+    notes: text(row.notes),
+  };
+}
+
+/** Three demo partners so a fresh device has something to show and assign. */
+const DEMO_SUPPLIERS: Supplier[] = [
+  {
+    id: "sup-charter",
+    name: "Charter partner",
+    serviceType: "Yacht & Boat Charter",
+    contact: "charter@example.com",
+    notes: "Demo supplier — vetted charter fleet on the coast.",
+  },
+  {
+    id: "sup-catering",
+    name: "Catering partner",
+    serviceType: "Private Chef",
+    contact: "catering@example.com",
+    notes: "Demo supplier — private chef brigade, same-day requests.",
+  },
+  {
+    id: "sup-transfer",
+    name: "Transfer partner",
+    serviceType: "Chauffeur & Transfers",
+    contact: "transfers@example.com",
+    notes: "Demo supplier — airport and city transfers, 24/7.",
+  },
+];
+
+/**
+ * Resolve a stored supplierId to a supplier name. A deleted supplier leaves its
+ * id dangling on old requests, and such an id reads as "—".
+ */
+function supplierNameById(suppliers: Supplier[], id: string | null): string {
+  if (!id) return "—";
+  return suppliers.find((s) => s.id === id)?.name ?? "—";
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -150,6 +222,7 @@ const tabs: TabDef[] = [
   { id: "concierge", label: "Concierge", icon: "✦" },
   { id: "services", label: "Services", icon: "❖" },
   { id: "staff", label: "Staff", icon: "⚡" },
+  { id: "agency", label: "Agency", icon: "◈" },
   { id: "revenue", label: "Revenue", icon: "◆" },
 ];
 
@@ -165,6 +238,10 @@ const tabContent: Record<Tab, TabContent> = {
   staff: {
     title: "Staff Operations",
     subtitle: "AI-Generated Task Automation",
+  },
+  agency: {
+    title: "Agency Operations",
+    subtitle: "Suppliers and recorded requests",
   },
   revenue: {
     title: "Revenue Analytics",
@@ -289,6 +366,64 @@ function Home() {
     } catch { setRequestsStorageError(true); }
   }, [guestRequests]);
 
+  // ── Suppliers — the agency's service partners for this device ──────────────
+  // MOCK / DEMO DATA LAYER: same shape as the requests store above — React
+  // state mirrored to this browser's localStorage ("aura-suppliers"), no server
+  // behind it. A device with nothing stored starts from the demo partners.
+  const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
+    try {
+      const stored = localStorage.getItem("aura-suppliers");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map(normalizeSupplier)
+            .filter((s): s is Supplier => s !== null);
+        }
+      }
+    } catch { /* ignore */ }
+    return DEMO_SUPPLIERS;
+  });
+  const [suppliersStorageError, setSuppliersStorageError] = useState(false);
+
+  // Persist suppliers (guarded — a full or blocked store must not break the app)
+  useEffect(() => {
+    try {
+      localStorage.setItem("aura-suppliers", JSON.stringify(suppliers));
+      setSuppliersStorageError(false);
+    } catch { setSuppliersStorageError(true); }
+  }, [suppliers]);
+
+  const handleAddSupplier = useCallback((draft: Omit<Supplier, "id">) => {
+    const supplier: Supplier = {
+      id: `sup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ...draft,
+    };
+    setSuppliers((prev) => [...prev, supplier]);
+  }, []);
+  const handleUpdateSupplier = useCallback(
+    (id: string, draft: Omit<Supplier, "id">) => {
+      setSuppliers((prev) => prev.map((s) => (s.id === id ? { ...s, ...draft } : s)));
+    },
+    [],
+  );
+  const handleDeleteSupplier = useCallback((id: string) => {
+    // Requests that pointed at this supplier keep their id and read as "—".
+    setSuppliers((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+  const handleRetrySuppliers = useCallback(() => {
+    try {
+      const stored = localStorage.getItem("aura-suppliers");
+      const parsed = stored ? JSON.parse(stored) : [];
+      setSuppliers(
+        Array.isArray(parsed)
+          ? parsed.map(normalizeSupplier).filter((s): s is Supplier => s !== null)
+          : [],
+      );
+      setSuppliersStorageError(false);
+    } catch { setSuppliersStorageError(true); }
+  }, []);
+
   const handleCreateRequest = useCallback(
     (serviceType: string, guestName = "Guest", details = "") => {
       const now = new Date().toISOString();
@@ -303,6 +438,7 @@ function Home() {
         agencyPct: revenueConfig.agencyCommissionPct,
         auraPct: revenueConfig.auraFeePct,
         staffNote: "",
+        supplierId: null,
         createdAt: now,
         updatedAt: now,
       };
@@ -389,6 +525,12 @@ function Home() {
         onUpdateRequest={handleUpdateRequest}
         onUpdateRequestStatus={handleUpdateRequestStatus}
         onRetryRequests={handleRetryRequests}
+        suppliers={suppliers}
+        suppliersStorageError={suppliersStorageError}
+        onAddSupplier={handleAddSupplier}
+        onUpdateSupplier={handleUpdateSupplier}
+        onDeleteSupplier={handleDeleteSupplier}
+        onRetrySuppliers={handleRetrySuppliers}
       />
       <Footer />
 
@@ -581,6 +723,12 @@ function TabPanels({
   onUpdateRequestStatus,
   onUpdateRequest,
   onRetryRequests,
+  suppliers,
+  suppliersStorageError,
+  onAddSupplier,
+  onUpdateSupplier,
+  onDeleteSupplier,
+  onRetrySuppliers,
 }: {
   activeTab: Tab;
   activeProperty: Property;
@@ -597,6 +745,12 @@ function TabPanels({
   onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
+  suppliers: Supplier[];
+  suppliersStorageError: boolean;
+  onAddSupplier: (draft: Omit<Supplier, "id">) => void;
+  onUpdateSupplier: (id: string, draft: Omit<Supplier, "id">) => void;
+  onDeleteSupplier: (id: string) => void;
+  onRetrySuppliers: () => void;
 }) {
   return (
     <main className="flex-1 px-6 py-10 md:px-12 md:py-14 lg:px-24 lg:py-16">
@@ -642,6 +796,19 @@ function TabPanels({
                   onUpdateRequest={onUpdateRequest}
                   onUpdateRequestStatus={onUpdateRequestStatus}
                   onRetryRequests={onRetryRequests}
+                  suppliers={suppliers}
+                />
+              ) : tab.id === "agency" ? (
+                <AgencyPanel
+                  guestRequests={guestRequests}
+                  requestsStorageError={requestsStorageError}
+                  onRetryRequests={onRetryRequests}
+                  suppliers={suppliers}
+                  suppliersStorageError={suppliersStorageError}
+                  onAddSupplier={onAddSupplier}
+                  onUpdateSupplier={onUpdateSupplier}
+                  onDeleteSupplier={onDeleteSupplier}
+                  onRetrySuppliers={onRetrySuppliers}
                 />
               ) : tab.id === "revenue" ? (
                 <RevenuePanel revenueTransactions={revenueTransactions} activeProperty={activeProperty} />
@@ -1947,6 +2114,7 @@ function StaffPanel({
   onUpdateRequest,
   onUpdateRequestStatus,
   onRetryRequests,
+  suppliers,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
@@ -1955,6 +2123,7 @@ function StaffPanel({
   onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
+  suppliers: Supplier[];
 }) {
   const completedCount = tasks.filter(
     (t) => t.status === "confirmed" || t.status === "completed",
@@ -2020,6 +2189,7 @@ function StaffPanel({
         onUpdateRequest={onUpdateRequest}
         onUpdateRequestStatus={onUpdateRequestStatus}
         onRetryRequests={onRetryRequests}
+        suppliers={suppliers}
       />
     </div>
   );
@@ -2064,12 +2234,14 @@ function StaffRequestsSection({
   onUpdateRequest,
   onUpdateRequestStatus,
   onRetryRequests,
+  suppliers,
 }: {
   guestRequests: GuestRequest[];
   requestsStorageError: boolean;
   onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
+  suppliers: Supplier[];
 }) {
   const [filter, setFilter] = useState<RequestFilter>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -2183,6 +2355,7 @@ function StaffRequestsSection({
               }
               onUpdateRequest={onUpdateRequest}
               onUpdateRequestStatus={onUpdateRequestStatus}
+              suppliers={suppliers}
             />
           ))}
         </div>
@@ -2197,12 +2370,14 @@ function StaffRequestRow({
   onToggle,
   onUpdateRequest,
   onUpdateRequestStatus,
+  suppliers,
 }: {
   request: GuestRequest;
   isExpanded: boolean;
   onToggle: () => void;
   onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+  suppliers: Supplier[];
 }) {
   return (
     <div
@@ -2223,6 +2398,9 @@ function StaffRequestRow({
           </p>
           <p className="mt-0.5 truncate text-[10px] font-light text-text-muted">
             {request.villaName}
+          </p>
+          <p className="mt-0.5 truncate text-[10px] font-light text-text-muted">
+            Supplier: {supplierNameById(suppliers, request.supplierId)}
           </p>
           <p className="mt-1 text-[10px] font-light text-text-muted">
             Updated {formatRequestStamp(request.updatedAt)}
@@ -2249,6 +2427,7 @@ function StaffRequestRow({
             request={request}
             onUpdateRequest={onUpdateRequest}
             onUpdateRequestStatus={onUpdateRequestStatus}
+            suppliers={suppliers}
           />
         </div>
       )}
@@ -2261,10 +2440,12 @@ function StaffRequestEditor({
   request,
   onUpdateRequest,
   onUpdateRequestStatus,
+  suppliers,
 }: {
   request: GuestRequest;
   onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
+  suppliers: Supplier[];
 }) {
   // Local strings so a half-typed value ("12.") never fights the stored number.
   const [priceInput, setPriceInput] = useState(
@@ -2452,6 +2633,31 @@ function StaffRequestEditor({
           Set a price to see the split
         </p>
       )}
+      {/* Supplier assignment — picks a partner from the Agency tab. */}
+      <div>
+        <label className={requestLabelClass} htmlFor={`request-supplier-${request.id}`}>
+          Supplier
+        </label>
+        <select
+          id={`request-supplier-${request.id}`}
+          value={request.supplierId ?? ""}
+          onChange={(e) =>
+            onUpdateRequest(request.id, { supplierId: e.target.value || null })
+          }
+          className={`mt-1.5 cursor-pointer ${requestInputClass}`}
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <option value="">No supplier</option>
+          {suppliers.map((supplier) => (
+            <option key={supplier.id} value={supplier.id}>
+              {`${supplier.name} — ${supplier.serviceType}`}
+            </option>
+          ))}
+        </select>
+        <p className="mt-1.5 text-[10px] font-light text-text-muted">
+          Assigned: {supplierNameById(suppliers, request.supplierId)}
+        </p>
+      </div>
       <div>
         <label className={requestLabelClass} htmlFor={`request-note-${request.id}`}>
           Staff note
@@ -3787,5 +3993,589 @@ function Footer() {
         </p>
       </div>
     </footer>
+  );
+}
+
+// ── Agency — suppliers + the recorded-request ledger ─────────────────────────
+
+const supplierInputClass =
+  "w-full rounded-lg border border-border bg-transparent px-3 py-2 text-xs font-light text-text-primary outline-none transition-colors duration-200 placeholder:text-text-muted focus:border-[var(--aura-accent,#D4AF37)]";
+const supplierButtonClass =
+  "cursor-pointer rounded-md border border-[var(--aura-accent,#D4AF37)] px-3 py-1 text-[11px] font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-colors duration-200 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight";
+const emptySupplierDraft: Omit<Supplier, "id"> = {
+  name: "",
+  serviceType: "",
+  contact: "",
+  notes: "",
+};
+
+/**
+ * Suppliers section — the agency's own partner list. Add, edit and delete are
+ * local records only; a supplier is a contact, never a payee.
+ */
+function AgencySuppliersSection({
+  suppliers,
+  suppliersStorageError,
+  onAddSupplier,
+  onUpdateSupplier,
+  onDeleteSupplier,
+  onRetrySuppliers,
+}: {
+  suppliers: Supplier[];
+  suppliersStorageError: boolean;
+  onAddSupplier: (draft: Omit<Supplier, "id">) => void;
+  onUpdateSupplier: (id: string, draft: Omit<Supplier, "id">) => void;
+  onDeleteSupplier: (id: string) => void;
+  onRetrySuppliers: () => void;
+}) {
+  const [draft, setDraft] = useState<Omit<Supplier, "id">>(emptySupplierDraft);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<Omit<Supplier, "id">>(emptySupplierDraft);
+  const canAdd = draft.name.trim().length > 0;
+  const canSave = editDraft.name.trim().length > 0;
+
+  const submitDraft = () => {
+    if (!canAdd) return;
+    onAddSupplier({
+      name: draft.name.trim(),
+      serviceType: draft.serviceType.trim(),
+      contact: draft.contact.trim(),
+      notes: draft.notes.trim(),
+    });
+    setDraft(emptySupplierDraft);
+  };
+  const startEdit = (supplier: Supplier) => {
+    setEditingId(supplier.id);
+    setEditDraft({
+      name: supplier.name,
+      serviceType: supplier.serviceType,
+      contact: supplier.contact,
+      notes: supplier.notes,
+    });
+  };
+  const saveEdit = () => {
+    if (editingId === null || !canSave) return;
+    onUpdateSupplier(editingId, {
+      name: editDraft.name.trim(),
+      serviceType: editDraft.serviceType.trim(),
+      contact: editDraft.contact.trim(),
+      notes: editDraft.notes.trim(),
+    });
+    setEditingId(null);
+  };
+
+  return (
+    <div className="rounded-2xl border border-border bg-charcoal p-6 md:p-10 lg:p-12">
+      <div className="flex flex-wrap items-center gap-3">
+        <h3 className="text-xl font-light tracking-wide text-text-primary md:text-2xl">
+          Suppliers
+        </h3>
+        <DemoDataBadge />
+      </div>
+      <p className="mt-1 text-sm font-light text-text-secondary">
+        Suppliers are added and managed by your agency.
+      </p>
+
+      {/* Add form */}
+      <div
+        className="mt-6 rounded-xl border border-border p-4"
+        style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+      >
+        <p className={requestLabelClass}>Add a supplier</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className={requestLabelClass} htmlFor="supplier-new-name">
+              Name
+            </label>
+            <input
+              id="supplier-new-name"
+              value={draft.name}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              placeholder="e.g. Charter partner"
+              className={`mt-1.5 ${supplierInputClass}`}
+            />
+          </div>
+          <div>
+            <label className={requestLabelClass} htmlFor="supplier-new-service">
+              Service type
+            </label>
+            <input
+              id="supplier-new-service"
+              value={draft.serviceType}
+              onChange={(e) => setDraft({ ...draft, serviceType: e.target.value })}
+              placeholder="e.g. Yacht &amp; Boat Charter"
+              className={`mt-1.5 ${supplierInputClass}`}
+            />
+          </div>
+          <div>
+            <label className={requestLabelClass} htmlFor="supplier-new-contact">
+              Contact
+            </label>
+            <input
+              id="supplier-new-contact"
+              value={draft.contact}
+              onChange={(e) => setDraft({ ...draft, contact: e.target.value })}
+              placeholder="Email or phone"
+              className={`mt-1.5 ${supplierInputClass}`}
+            />
+          </div>
+          <div>
+            <label className={requestLabelClass} htmlFor="supplier-new-notes">
+              Notes
+            </label>
+            <input
+              id="supplier-new-notes"
+              value={draft.notes}
+              onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
+              placeholder="Optional"
+              className={`mt-1.5 ${supplierInputClass}`}
+            />
+          </div>
+        </div>
+        <button
+          onClick={submitDraft}
+          disabled={!canAdd}
+          className={`mt-4 ${supplierButtonClass} disabled:cursor-not-allowed disabled:opacity-40`}
+        >
+          Add supplier
+        </button>
+      </div>
+
+      {/* Storage error — same pattern as the requests list */}
+      {suppliersStorageError && (
+        <div
+          className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <p className="text-xs font-light text-text-secondary">
+            We couldn't load your suppliers. Please try again.
+          </p>
+          <button onClick={onRetrySuppliers} className={supplierButtonClass}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      {suppliers.length === 0 ? (
+        <div
+          className="mt-4 rounded-2xl border border-border px-6 py-8 text-center"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <p className="text-sm font-light text-text-primary">No suppliers yet</p>
+          <p className="mt-1 text-xs font-light text-text-muted">
+            Partners you add here can be assigned to a request on the Staff tab.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {suppliers.map((supplier) =>
+            editingId === supplier.id ? (
+              <div
+                key={supplier.id}
+                className="rounded-xl border p-4"
+                style={{
+                  backgroundColor: "var(--aura-surface, #0B0B0B)",
+                  borderColor: "var(--aura-border-accent, rgba(212,175,55,0.3))",
+                }}
+              >
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label
+                      className={requestLabelClass}
+                      htmlFor={`supplier-edit-name-${supplier.id}`}
+                    >
+                      Name
+                    </label>
+                    <input
+                      id={`supplier-edit-name-${supplier.id}`}
+                      value={editDraft.name}
+                      onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })}
+                      className={`mt-1.5 ${supplierInputClass}`}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className={requestLabelClass}
+                      htmlFor={`supplier-edit-service-${supplier.id}`}
+                    >
+                      Service type
+                    </label>
+                    <input
+                      id={`supplier-edit-service-${supplier.id}`}
+                      value={editDraft.serviceType}
+                      onChange={(e) =>
+                        setEditDraft({ ...editDraft, serviceType: e.target.value })
+                      }
+                      className={`mt-1.5 ${supplierInputClass}`}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className={requestLabelClass}
+                      htmlFor={`supplier-edit-contact-${supplier.id}`}
+                    >
+                      Contact
+                    </label>
+                    <input
+                      id={`supplier-edit-contact-${supplier.id}`}
+                      value={editDraft.contact}
+                      onChange={(e) =>
+                        setEditDraft({ ...editDraft, contact: e.target.value })
+                      }
+                      className={`mt-1.5 ${supplierInputClass}`}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className={requestLabelClass}
+                      htmlFor={`supplier-edit-notes-${supplier.id}`}
+                    >
+                      Notes
+                    </label>
+                    <input
+                      id={`supplier-edit-notes-${supplier.id}`}
+                      value={editDraft.notes}
+                      onChange={(e) => setEditDraft({ ...editDraft, notes: e.target.value })}
+                      className={`mt-1.5 ${supplierInputClass}`}
+                    />
+                  </div>
+                </div>
+                <div className="mt-4 flex gap-2">
+                  <button
+                    onClick={saveEdit}
+                    disabled={!canSave}
+                    className={`${supplierButtonClass} disabled:cursor-not-allowed disabled:opacity-40`}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => setEditingId(null)}
+                    className="cursor-pointer rounded-md border border-border px-3 py-1 text-[11px] font-medium tracking-wider text-text-secondary transition-colors duration-200 hover:text-[var(--aura-accent,#D4AF37)]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                key={supplier.id}
+                className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-border px-4 py-3"
+                style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-light tracking-wide text-text-primary">
+                    {supplier.name}
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-light text-text-secondary">
+                    {supplier.serviceType || "—"}
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-light text-text-muted">
+                    {supplier.contact || "—"}
+                  </p>
+                  {supplier.notes && (
+                    <p className="mt-1 text-[11px] font-light text-text-muted">
+                      {supplier.notes}
+                    </p>
+                  )}
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button onClick={() => startEdit(supplier)} className={supplierButtonClass}>
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => onDeleteSupplier(supplier.id)}
+                    className="cursor-pointer rounded-md border border-border px-3 py-1 text-[11px] font-medium tracking-wider text-text-secondary transition-colors duration-200 hover:text-text-primary"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Agency panel — (1) the supplier list, (2) the ledger of confirmed and
+ * completed requests across every villa. Amounts are derived on render from the
+ * request's own recorded price and percentages; nothing is stored, nothing is
+ * charged.
+ */
+function AgencyPanel({
+  guestRequests,
+  requestsStorageError,
+  onRetryRequests,
+  suppliers,
+  suppliersStorageError,
+  onAddSupplier,
+  onUpdateSupplier,
+  onDeleteSupplier,
+  onRetrySuppliers,
+}: {
+  guestRequests: GuestRequest[];
+  requestsStorageError: boolean;
+  onRetryRequests: () => void;
+  suppliers: Supplier[];
+  suppliersStorageError: boolean;
+  onAddSupplier: (draft: Omit<Supplier, "id">) => void;
+  onUpdateSupplier: (id: string, draft: Omit<Supplier, "id">) => void;
+  onDeleteSupplier: (id: string) => void;
+  onRetrySuppliers: () => void;
+}) {
+  // Confirmed + completed only, newest first, with the supplier name resolved
+  // and the shares derived from the request's own percentages.
+  const rows = useMemo(
+    () =>
+      guestRequests
+        .filter((r) => r.status === "confirmed" || r.status === "completed")
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+        .map((request) => ({
+          request,
+          supplierName: supplierNameById(suppliers, request.supplierId),
+          split: splitRequestAmounts(request.price, request.agencyPct, request.auraPct),
+        })),
+    [guestRequests, suppliers],
+  );
+
+  // Totals are the sum of the rows rendered above — a row with no recorded
+  // price contributes nothing.
+  const totals = rows.reduce(
+    (acc, row) => ({
+      guestPrice: acc.guestPrice + (row.request.price ?? 0),
+      supplierAmount: acc.supplierAmount + (row.split.supplierAmount ?? 0),
+      agencyAmount: acc.agencyAmount + (row.split.agencyAmount ?? 0),
+      auraAmount: acc.auraAmount + (row.split.auraAmount ?? 0),
+    }),
+    { guestPrice: 0, supplierAmount: 0, agencyAmount: 0, auraAmount: 0 },
+  );
+
+  const csvRows = rows.map((row) => ({
+    service: row.request.serviceType,
+    supplier: row.supplierName,
+    guestPrice: row.request.price,
+    supplierAmount: row.split.supplierAmount,
+    agencyAmount: row.split.agencyAmount,
+    auraAmount: row.split.auraAmount,
+    status: GUEST_REQUEST_LABELS[row.request.status],
+  }));
+
+  // Client-side download of the very rows shown below — no library, no server.
+  const handleExportCsv = () => {
+    if (csvRows.length === 0) return;
+    const blob = new Blob([toCsv(csvRows)], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "aura-requests.csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="rounded-2xl border border-border bg-charcoal p-8 md:p-10 lg:p-12">
+        <div className="mb-2">
+          <h2
+            className="text-2xl font-light tracking-wide md:text-3xl"
+            style={{ color: "var(--aura-accent, #D4AF37)" }}
+          >
+            Agency Operations
+          </h2>
+          <p className="mt-2 font-light text-text-secondary">
+            Suppliers and recorded requests for this agency
+          </p>
+          <div
+            className="mt-6 h-px w-24"
+            style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
+          />
+        </div>
+      </div>
+
+      <AgencySuppliersSection
+        suppliers={suppliers}
+        suppliersStorageError={suppliersStorageError}
+        onAddSupplier={onAddSupplier}
+        onUpdateSupplier={onUpdateSupplier}
+        onDeleteSupplier={onDeleteSupplier}
+        onRetrySuppliers={onRetrySuppliers}
+      />
+
+      {/* Requests — confirmed and completed only */}
+      <div className="rounded-2xl border border-border bg-charcoal p-8 md:p-10 lg:p-12">
+        <div className="mb-8">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <h3 className="text-xl font-light tracking-wide text-text-primary md:text-2xl">
+                Requests
+              </h3>
+              <DemoDataBadge />
+            </div>
+            <button
+              onClick={handleExportCsv}
+              disabled={csvRows.length === 0}
+              className={`${supplierButtonClass} disabled:cursor-not-allowed disabled:opacity-40`}
+            >
+              Export CSV
+            </button>
+          </div>
+          <p className="mt-1 text-sm font-light text-text-muted">
+            Confirmed and completed requests across every villa. Amounts are
+            recorded only — nothing is charged in the app.
+          </p>
+        </div>
+
+        {requestsStorageError && (
+          <div
+            className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3"
+            style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+          >
+            <p className="text-xs font-light text-text-secondary">
+              We couldn't load your requests. Please try again.
+            </p>
+            <button onClick={onRetryRequests} className={supplierButtonClass}>
+              Retry
+            </button>
+          </div>
+        )}
+
+        {rows.length === 0 ? (
+          <div
+            className="rounded-2xl border border-border px-6 py-8 text-center"
+            style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+          >
+            <p className="text-sm font-light text-text-primary">
+              No confirmed requests yet
+            </p>
+            <p className="mt-1 text-xs font-light text-text-muted">
+              Requests you confirm on the Staff tab will be listed here.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto -mx-2 px-2">
+            <table className="w-full min-w-[700px] border-separate border-spacing-0">
+              <thead>
+                <tr>
+                  <th className="pb-4 pl-4 text-left text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    Service
+                  </th>
+                  <th className="pb-4 text-left text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    Supplier
+                  </th>
+                  <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    Guest price
+                  </th>
+                  <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    Supplier amount
+                  </th>
+                  <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    Agency amount
+                  </th>
+                  <th className="pb-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    AURA amount
+                  </th>
+                  <th className="pb-4 pr-4 text-right text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+                    Status
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, idx) => (
+                  <tr
+                    key={row.request.id}
+                    style={{
+                      backgroundColor:
+                        idx % 2 === 0
+                          ? "var(--aura-card, #1A1A1A)"
+                          : "#1E1E1E",
+                    }}
+                  >
+                    <td className="py-4 pl-4 text-sm font-light tracking-wide text-text-primary first:rounded-l-lg">
+                      {row.request.serviceType}
+                      <span className="mt-0.5 block text-[11px] font-light text-text-muted">
+                        {row.request.guestName} · {row.request.villaName}
+                      </span>
+                    </td>
+                    <td className="py-4 pr-2 text-sm font-light text-text-secondary">
+                      {row.supplierName}
+                    </td>
+                    <td className="py-4 pr-2 text-right text-sm font-light text-text-secondary">
+                      {formatRequestAmount(row.request.price)}
+                    </td>
+                    <td className="py-4 pr-2 text-right text-sm font-light text-text-secondary">
+                      {formatRequestAmount(row.split.supplierAmount)}
+                    </td>
+                    <td
+                      className="py-4 pr-2 text-right text-sm font-medium tracking-wide"
+                      style={{ color: "var(--aura-accent, #D4AF37)" }}
+                    >
+                      {formatRequestAmount(row.split.agencyAmount)}
+                    </td>
+                    <td
+                      className="py-4 pr-2 text-right text-sm font-light tracking-wide"
+                      style={{ color: "var(--aura-accent, #D4AF37)" }}
+                    >
+                      {formatRequestAmount(row.split.auraAmount)}
+                    </td>
+                    <td className="py-4 pr-4 text-right last:rounded-r-lg">
+                      <span className={requestStatusBadge(row.request.status)}>
+                        {GUEST_REQUEST_LABELS[row.request.status]}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={7} className="pt-6">
+                    <div
+                      className="h-px w-full"
+                      style={{
+                        background:
+                          "linear-gradient(to right, var(--aura-accent, #D4AF37), transparent)",
+                        opacity: 0.3,
+                      }}
+                    />
+                  </td>
+                </tr>
+                <tr className="border-t border-[var(--aura-border-accent,rgba(212,175,55,0.3))]">
+                  <td className="py-3 pl-4 text-sm font-semibold tracking-wide text-text-primary">
+                    Total
+                  </td>
+                  <td className="py-3 pr-2" />
+                  <td className="py-3 pr-2 text-right text-sm font-semibold text-text-primary">
+                    {formatRequestAmount(totals.guestPrice)}
+                  </td>
+                  <td className="py-3 pr-2 text-right text-sm font-semibold text-text-primary">
+                    {formatRequestAmount(totals.supplierAmount)}
+                  </td>
+                  <td
+                    className="py-3 pr-2 text-right text-sm font-semibold tracking-wide"
+                    style={{ color: "var(--aura-accent, #D4AF37)" }}
+                  >
+                    {formatRequestAmount(totals.agencyAmount)}
+                  </td>
+                  <td
+                    className="py-3 pr-2 text-right text-sm font-semibold tracking-wide"
+                    style={{ color: "var(--aura-accent, #D4AF37)" }}
+                  >
+                    {formatRequestAmount(totals.auraAmount)}
+                  </td>
+                  <td className="py-3 pr-4 text-right">
+                    <span className="text-[11px] font-light text-text-muted">
+                      {rows.length} {rows.length === 1 ? "request" : "requests"}
+                    </span>
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
