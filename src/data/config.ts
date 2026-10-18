@@ -5,7 +5,7 @@
 
 export const agencyConfig = {
   /** Agency brand name — shown in the header and in the footer. */
-  agencyName: "Your Agency",
+  agencyName: "Versilia Luxury Estates",
   /** Optional logo URL. When set it replaces the AURA wordmark in the header. */
   logoUrl: "",
   /** Brand accent colour, applied to the --aura-accent CSS variable. */
