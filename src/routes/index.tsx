@@ -103,13 +103,6 @@ interface GuestRequest {
   createdAt: string;
   updatedAt: string;
 }
-// Ordered lifecycle shown to the guest as a timeline.
-const GUEST_REQUEST_STEPS: Array<Exclude<GuestRequestStatus, "cancelled">> = [
-  "received",
-  "in_progress",
-  "confirmed",
-  "completed",
-];
 const GUEST_REQUEST_LABELS: Record<GuestRequestStatus, string> = {
   received: "Received",
   in_progress: "In progress",
@@ -4085,7 +4078,7 @@ function BookingModal({
               once it's confirmed.
             </p>
             <p className="text-[10px] font-light text-text-muted/60">
-              Follow the status under Services → Your Requests.
+              Follow the status under 🛒 I Miei Servizi.
             </p>
             <button
               onClick={handleClose}
