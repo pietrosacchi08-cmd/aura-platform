@@ -7,8 +7,10 @@ import {
   computeSplit,
   conciergeImages,
   conciergeServices,
+  guestAccess,
   revenueConfig,
   splitRequestAmounts,
+  staffAccess,
   subscriptionPrice,
   toCsv,
   type ConciergeService,
@@ -16,7 +18,27 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type Tab = "concierge" | "services" | "staff" | "agency" | "revenue";
+type Tab =
+  | "concierge"
+  | "services"
+  | "my-services"
+  | "staff"
+  | "agency"
+  | "revenue";
+
+/** Which of the two split apps is mounted: the guest app or the staff app. */
+type AppMode = "guest" | "staff";
+
+/** Entry-flow steps: pick a villa, pick a role, then present credentials. */
+type GateScreen = "villa" | "role" | "guest-auth" | "staff-auth";
+
+/** A guest stay session — the guest is bound to one villa for the stay. */
+interface GuestSession {
+  sessionId: string;
+  villaId: string;
+  guestName: string;
+  startedAt: string;
+}
 
 interface TabDef {
   id: Tab;
@@ -31,6 +53,8 @@ interface TabContent {
 
 interface TaskItem {
   id: string;
+  /** Villa this task belongs to — only set on flattened "Tutte le Ville" rows. */
+  villaId?: string;
   module: string;
   description: string;
   status: "pending" | "in_progress" | "confirmed" | "completed";
@@ -72,16 +96,13 @@ interface GuestRequest {
   staffNote: string;
   /** Assigned supplier (Suppliers screen) or null while none is assigned. */
   supplierId: string | null;
+  /** Guest stay session that created the request (null for staff/manual rows). */
+  guestSessionId?: string | null;
+  /** Villa the request belongs to (null on legacy rows with no villa). */
+  villaId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
-// Ordered lifecycle shown to the guest as a timeline.
-const GUEST_REQUEST_STEPS: Array<Exclude<GuestRequestStatus, "cancelled">> = [
-  "received",
-  "in_progress",
-  "confirmed",
-  "completed",
-];
 const GUEST_REQUEST_LABELS: Record<GuestRequestStatus, string> = {
   received: "Received",
   in_progress: "In progress",
@@ -129,6 +150,16 @@ function normalizeGuestRequest(raw: unknown): GuestRequest | null {
     typeof row.supplierId === "string" && row.supplierId ? row.supplierId : null;
   const createdAt =
     typeof row.createdAt === "string" ? row.createdAt : new Date().toISOString();
+  // Legacy rows carry no villaId — derive it from the villa name when it
+  // matches a known property so the staff villa filter still works on them.
+  const villaId =
+    typeof row.villaId === "string" && row.villaId
+      ? row.villaId
+      : (properties.find((p) => p.name === villaName)?.id ?? null);
+  const guestSessionId =
+    typeof row.guestSessionId === "string" && row.guestSessionId
+      ? row.guestSessionId
+      : null;
   const num = (value: unknown, fallback: number): number =>
     typeof value === "number" && Number.isFinite(value) ? value : fallback;
   const price =
@@ -146,6 +177,8 @@ function normalizeGuestRequest(raw: unknown): GuestRequest | null {
     auraPct: num(row.auraPct, revenueConfig.auraFeePct),
     staffNote: typeof row.staffNote === "string" ? row.staffNote : "",
     supplierId,
+    guestSessionId,
+    villaId,
     createdAt,
     updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : createdAt,
   };
@@ -218,13 +251,22 @@ function supplierNameById(suppliers: Supplier[], id: string | null): string {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const tabs: TabDef[] = [
+/** Guest app: only the guest-facing tabs — staff/agency/revenue never mount. */
+const guestTabs: TabDef[] = [
   { id: "concierge", label: "Concierge", icon: "✦" },
   { id: "services", label: "Services", icon: "❖" },
+  { id: "my-services", label: "I Miei Servizi", icon: "🛒" },
+];
+
+/** Staff app: the B2B tabs — concierge/services never mount here. */
+const staffTabs: TabDef[] = [
   { id: "staff", label: "Staff", icon: "⚡" },
-  { id: "agency", label: "Agency", icon: "◈" },
+  { id: "agency", label: "Agency", icon: "◆" },
   { id: "revenue", label: "Revenue", icon: "◆" },
 ];
+
+/** Switcher value meaning "aggregate across the whole portfolio". */
+const ALL_VILLAS = "all";
 
 const tabContent: Record<Tab, TabContent> = {
   concierge: {
@@ -234,6 +276,10 @@ const tabContent: Record<Tab, TabContent> = {
   services: {
     title: "Concierge Services",
     subtitle: "Curated Services Marketplace",
+  },
+  "my-services": {
+    title: "I Miei Servizi",
+    subtitle: "Your stay, in one place",
   },
   staff: {
     title: "Staff Operations",
@@ -249,6 +295,118 @@ const tabContent: Record<Tab, TabContent> = {
   },
 };
 
+// ── Sessions (front-end only — no server behind the gate) ────────────────────
+const GUEST_SESSION_KEY = "aura_guest_session";
+const STAFF_AUTH_KEY = "aura_staff_auth";
+
+/** Build a fresh guest session id, e.g. "gs_lx3k9f_a1b2c3". */
+function createGuestSessionId(): string {
+  return `gs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function readGuestSession(): GuestSession | null {
+  try {
+    const stored = localStorage.getItem(GUEST_SESSION_KEY);
+    if (!stored) return null;
+    const raw = JSON.parse(stored) as Record<string, unknown>;
+    if (
+      typeof raw?.sessionId === "string" &&
+      typeof raw?.villaId === "string" &&
+      typeof raw?.guestName === "string"
+    ) {
+      return {
+        sessionId: raw.sessionId,
+        villaId: raw.villaId,
+        guestName: raw.guestName,
+        startedAt:
+          typeof raw.startedAt === "string" ? raw.startedAt : new Date().toISOString(),
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function writeGuestSession(session: GuestSession): void {
+  try {
+    localStorage.setItem(GUEST_SESSION_KEY, JSON.stringify(session));
+  } catch {
+    /* storage full or blocked — the session simply does not survive a refresh */
+  }
+}
+function clearGuestSession(): void {
+  try {
+    localStorage.removeItem(GUEST_SESSION_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+function readStaffAuth(): boolean {
+  try {
+    return sessionStorage.getItem(STAFF_AUTH_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeStaffAuth(): void {
+  try {
+    sessionStorage.setItem(STAFF_AUTH_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
+function clearStaffAuth(): void {
+  try {
+    sessionStorage.removeItem(STAFF_AUTH_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Decide what the first render shows: a resumed guest stay, a resumed staff
+ * session in this tab, or the entry flow. A guest session whose villa no longer
+ * exists falls back to the entry flow.
+ */
+function resolveInitialEntry(): {
+  mode: AppMode | null;
+  guestSession: GuestSession | null;
+  activePropertyId: string;
+} {
+  const session = readGuestSession();
+  if (session && properties.some((p) => p.id === session.villaId)) {
+    return { mode: "guest", guestSession: session, activePropertyId: session.villaId };
+  }
+  if (readStaffAuth()) {
+    return { mode: "staff", guestSession: null, activePropertyId: ALL_VILLAS };
+  }
+  return { mode: null, guestSession: null, activePropertyId: properties[0].id };
+}
+
+/** Synthetic property standing in for "Tutte le Ville" in labels and totals. */
+const AGGREGATE_PROPERTY: Property = {
+  ...properties[0],
+  id: ALL_VILLAS,
+  name: "Tutte le Ville",
+  refCode: "All properties",
+  location: "Portfolio",
+};
+
+/** Flatten the per-property task store into one list, stamping each villaId. */
+function flattenTasks(tasksByProperty: Record<string, TaskItem[]>): TaskItem[] {
+  return properties.flatMap((p) =>
+    (tasksByProperty[p.id] ?? []).map((t) => ({ ...t, villaId: p.id })),
+  );
+}
+
+/** Does a request belong to the villa currently selected in the switcher? */
+function requestMatchesVilla(request: GuestRequest, villaId: string): boolean {
+  if (villaId === ALL_VILLAS) return true;
+  if (request.villaId) return request.villaId === villaId;
+  const property = properties.find((p) => p.id === villaId);
+  return !!property && request.villaName === property.name;
+}
+
 // ── Route ────────────────────────────────────────────────────────────────────
 
 export const Route = createFileRoute("/")({
@@ -258,11 +416,20 @@ export const Route = createFileRoute("/")({
 // ── Home ─────────────────────────────────────────────────────────────────────
 
 function Home() {
-  const [activeTab, setActiveTab] = useState<Tab>("concierge");
-  const [toast, setToast] = useState<string | null>(null);
+  // ── Access gate — multi-tenant entry (villa → role → credentials) ──────────
+  // `mode` is null while the entry flow is showing; the split apps mount only
+  // once a role has been chosen, so guest DOM never contains staff surfaces.
+  const [initialEntry] = useState(resolveInitialEntry);
+  const [mode, setMode] = useState<AppMode | null>(initialEntry.mode);
+  const [guestSession, setGuestSession] = useState<GuestSession | null>(
+    initialEntry.guestSession,
+  );
 
-  const DEFAULT_PROPERTY = properties[0];
-  const [activePropertyId, setActivePropertyId] = useState(DEFAULT_PROPERTY.id);
+  const [activeTab, setActiveTab] = useState<Tab>(
+    initialEntry.mode === "staff" ? "staff" : "concierge",
+  );
+  const [toast, setToast] = useState<string | null>(null);
+  const [activePropertyId, setActivePropertyId] = useState(initialEntry.activePropertyId);
 
   // Property-scoped state (Record keyed by property id)
   const [tasksByProperty, setTasksByProperty] = useState<Record<string, TaskItem[]>>(() => {
@@ -302,10 +469,19 @@ function Home() {
     ];
     return seed;
   });
-  // Derive current values from activePropertyId
-  const activeProperty = properties.find((p) => p.id === activePropertyId)!;
-  const tasks = tasksByProperty[activePropertyId];
-  const revenueTransactions = revenueByProperty[activePropertyId];
+  // Derive current values from activePropertyId. In the staff app the switcher
+  // can sit on "Tutte le Ville" (aggregate) — then tasks and revenue rows are
+  // flattened across the whole portfolio and labels use a synthetic property.
+  const isAllVillas = mode === "staff" && activePropertyId === ALL_VILLAS;
+  const activeProperty =
+    properties.find((p) => p.id === activePropertyId) ?? properties[0];
+  const scopeProperty = isAllVillas ? AGGREGATE_PROPERTY : activeProperty;
+  const tasks = isAllVillas
+    ? flattenTasks(tasksByProperty)
+    : (tasksByProperty[activePropertyId] ?? []);
+  const revenueTransactions = isAllVillas
+    ? properties.flatMap((p) => revenueByProperty[p.id] ?? [])
+    : (revenueByProperty[activePropertyId] ?? []);
 
   // Persist tasks to localStorage (keyed by property)
   useEffect(() => {
@@ -317,6 +493,22 @@ function Home() {
   const setActiveTasks = useCallback(
     (updater: React.SetStateAction<TaskItem[]>) => {
       setTasksByProperty((prev) => {
+        if (activePropertyId === ALL_VILLAS) {
+          // Aggregate view: run the updater over the flattened list, then
+          // re-key every row back to the villa it came from.
+          const next =
+            typeof updater === "function"
+              ? (updater as (prevList: TaskItem[]) => TaskItem[])(flattenTasks(prev))
+              : updater;
+          const rebuilt: Record<string, TaskItem[]> = Object.fromEntries(
+            properties.map((p) => [p.id, [] as TaskItem[]]),
+          );
+          for (const task of next) {
+            const key = task.villaId ?? properties[0].id;
+            (rebuilt[key] ??= []).push(task);
+          }
+          return rebuilt;
+        }
         const current = prev[activePropertyId] ?? [];
         const next =
           typeof updater === "function"
@@ -329,11 +521,16 @@ function Home() {
   );
 
   const handleAddTask = useCallback(
-    (t: TaskItem) =>
+    (t: TaskItem) => {
+      // A task created while the staff switcher is on "Tutte le Ville" lands on
+      // the first villa — the aggregate key is a view, not a store.
+      const targetId =
+        activePropertyId === ALL_VILLAS ? properties[0].id : activePropertyId;
       setTasksByProperty((prev) => ({
         ...prev,
-        [activePropertyId]: [...(prev[activePropertyId] ?? []), t],
-      })),
+        [targetId]: [...(prev[targetId] ?? []), t],
+      }));
+    },
     [activePropertyId]
   );
 
@@ -427,10 +624,15 @@ function Home() {
   const handleCreateRequest = useCallback(
     (serviceType: string, guestName = "Guest", details = "") => {
       const now = new Date().toISOString();
+      // Every request is stamped with the villa it was raised for, and — while a
+      // guest stay is active — with that stay's session id so the guest's
+      // "I Miei Servizi" tab shows exactly this stay's requests.
+      const villaId =
+        activePropertyId === ALL_VILLAS ? null : activePropertyId;
       const request: GuestRequest = {
         id: `gr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        guestName,
-        villaName: properties.find((p) => p.id === activePropertyId)?.name ?? "—",
+        guestName: guestSession?.guestName || guestName,
+        villaName: properties.find((p) => p.id === villaId)?.name ?? "—",
         serviceType,
         details,
         status: "received",
@@ -439,12 +641,14 @@ function Home() {
         auraPct: revenueConfig.auraFeePct,
         staffNote: "",
         supplierId: null,
+        guestSessionId: guestSession?.sessionId ?? null,
+        villaId,
         createdAt: now,
         updatedAt: now,
       };
       setGuestRequests((prev) => [request, ...prev]);
     },
-    [activePropertyId, properties],
+    [activePropertyId, guestSession],
   );
 
   // Every edit stamps updatedAt, so the staff list shows when a request moved.
@@ -482,11 +686,53 @@ function Home() {
     if (id === activePropertyId) return;
     const prop = properties.find((p) => p.id === id);
     setActivePropertyId(id);
-    if (prop) {
-      setToast(`Switched active workspace to ${prop.name}`);
+    const label = prop ? prop.name : id === ALL_VILLAS ? "Tutte le Ville" : null;
+    if (label) {
+      setToast(`Switched active workspace to ${label}`);
       setTimeout(() => setToast(null), 2500);
     }
   }, [activePropertyId]);
+
+  // ── Gate handlers ─────────────────────────────────────────────────────────
+  const handleGuestEnter = useCallback((session: GuestSession) => {
+    writeGuestSession(session);
+    setGuestSession(session);
+    setMode("guest");
+    setActivePropertyId(session.villaId);
+    setActiveTab("concierge");
+  }, []);
+  const handleStaffEnter = useCallback(() => {
+    writeStaffAuth();
+    setGuestSession(null);
+    setMode("staff");
+    setActivePropertyId(ALL_VILLAS);
+    setActiveTab("staff");
+  }, []);
+  const handleSignOut = useCallback(() => {
+    clearGuestSession();
+    clearStaffAuth();
+    setGuestSession(null);
+    setMode(null);
+    setActiveTab("concierge");
+  }, []);
+
+  // No role chosen yet: the entry flow is the whole page.
+  if (!mode) {
+    return (
+      <div
+        className="flex min-h-dvh flex-col text-text-primary"
+        style={
+          {
+            "--aura-accent": agencyConfig.primaryColor,
+            backgroundColor: "var(--aura-surface, #0B0B0B)",
+          } as React.CSSProperties
+        }
+      >
+        <AppGate onGuestEnter={handleGuestEnter} onStaffEnter={handleStaffEnter} />
+        <Footer />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -499,17 +745,24 @@ function Home() {
       }
     >
       <Header
-        property={activeProperty}
+        mode={mode}
+        property={scopeProperty}
         properties={properties}
         activePropertyId={activePropertyId}
         onSwitchProperty={handleSwitchProperty}
+        guestName={guestSession?.guestName ?? ""}
+        onSignOut={handleSignOut}
       />
       <TabBar
+        mode={mode}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         pendingCount={tasks.filter((t) => t.status === "pending" || t.status === "in_progress").length}
       />
       <TabPanels
+        mode={mode}
+        guestSession={guestSession}
+        activeVillaId={isAllVillas ? ALL_VILLAS : activePropertyId}
         activeTab={activeTab}
         activeProperty={activeProperty}
         properties={properties}
@@ -546,18 +799,281 @@ function Home() {
   );
 }
 
+// ── App Gate — villa selection → role → credentials ──────────────────────────
+const gateInputClass =
+  "w-full rounded-xl border border-border bg-transparent px-4 py-3.5 text-sm font-light text-text-primary outline-none transition-colors duration-300 placeholder:text-text-muted/50 focus:border-[var(--aura-accent,#D4AF37)]";
+const gateLabelClass =
+  "mb-2 block text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted";
+const gatePrimaryClass =
+  "w-full cursor-pointer rounded-xl border border-[var(--aura-accent,#D4AF37)] px-6 py-4 text-xs font-medium uppercase tracking-[0.18em] text-[var(--aura-accent,#D4AF37)] transition-colors duration-300 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight";
+const gateSecondaryClass =
+  "w-full cursor-pointer rounded-xl border border-border px-6 py-4 text-xs font-medium uppercase tracking-[0.18em] text-text-secondary transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-[var(--aura-accent,#D4AF37)]";
+
+/**
+ * The public entry point of the white-label platform: a guest picks the villa
+ * they are staying in, then says who they are, then presents the credential
+ * that matches that role. Nothing beyond this gate mounts until it is passed.
+ */
+function AppGate({
+  onGuestEnter,
+  onStaffEnter,
+}: {
+  onGuestEnter: (session: GuestSession) => void;
+  onStaffEnter: () => void;
+}) {
+  const [screen, setScreen] = useState<GateScreen>("villa");
+  const [villaId, setVillaId] = useState<string | null>(null);
+  const [guestName, setGuestName] = useState("");
+  const [pin, setPin] = useState("");
+  const [staffPassword, setStaffPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const villa = properties.find((p) => p.id === villaId) ?? null;
+
+  const goBack = () => {
+    setError(null);
+    if (screen === "role") setScreen("villa");
+    else setScreen("role");
+  };
+
+  const handleGuestSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const name = guestName.trim();
+    if (!name) {
+      setError("Inserisci il tuo nome.");
+      return;
+    }
+    if (pin.trim() !== guestAccess.stayPin) {
+      setError("PIN non valido. Controlla il PIN consegnato al check-in.");
+      return;
+    }
+    if (!villa) return;
+    setError(null);
+    onGuestEnter({
+      sessionId: createGuestSessionId(),
+      villaId: villa.id,
+      guestName: name,
+      startedAt: new Date().toISOString(),
+    });
+  };
+
+  const handleStaffSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (staffPassword !== staffAccess.password) {
+      setError("Password non valida.");
+      return;
+    }
+    setError(null);
+    onStaffEnter();
+  };
+
+  return (
+    <main className="flex flex-1 flex-col px-6 py-12 md:px-12 md:py-16 lg:px-24">
+      <div className="mx-auto w-full max-w-5xl">
+        {/* Brand */}
+        <div className="mb-12 text-center">
+          <h1
+            className="text-2xl font-light tracking-[0.3em] md:text-3xl"
+            style={{ color: "var(--aura-accent, #D4AF37)" }}
+          >
+            AURA
+          </h1>
+          <p className="mt-3 text-[10px] font-light uppercase tracking-[0.28em] text-text-secondary">
+            {agencyConfig.agencyName}
+          </p>
+          <div
+            className="mx-auto mt-8 h-px w-16"
+            style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
+          />
+        </div>
+
+        {screen === "villa" && (
+          <div className="animate-fade-in">
+            <h2 className="text-xl font-light tracking-wide md:text-2xl">
+              Seleziona la tua villa
+            </h2>
+            <p className="mt-2 text-sm font-light text-text-secondary">
+              Scegli la residenza per accedere ai servizi dedicati.
+            </p>
+            <div className="mt-8 grid grid-cols-2 gap-4 md:gap-6">
+              {properties.map((property) => (
+                <button
+                  key={property.id}
+                  type="button"
+                  onClick={() => {
+                    setVillaId(property.id);
+                    setError(null);
+                    setScreen("role");
+                  }}
+                  className="group cursor-pointer overflow-hidden rounded-2xl border border-border bg-charcoal text-left transition-all duration-300 hover:border-[var(--aura-accent,#D4AF37)]"
+                >
+                  <div className="aspect-[4/3] w-full overflow-hidden">
+                    <img
+                      src={property.heroImage}
+                      alt={property.heroAlt}
+                      className="h-full w-full object-cover transition-transform duration-700 ease-out group-hover:scale-105"
+                      loading="lazy"
+                    />
+                  </div>
+                  <div className="p-4 md:p-5">
+                    <p className="text-sm font-light leading-snug text-text-primary">
+                      {property.name}
+                    </p>
+                    <p className="mt-1 text-[11px] font-light text-text-muted">
+                      {property.location}
+                    </p>
+                    <p
+                      className="mt-3 text-[10px] font-medium uppercase tracking-[0.15em]"
+                      style={{ color: "var(--aura-accent, #D4AF37)" }}
+                    >
+                      {property.refCode}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {screen !== "villa" && (
+          <div className="animate-fade-in">
+            <button
+              type="button"
+              onClick={goBack}
+              className="mb-8 cursor-pointer text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted transition-colors duration-300 hover:text-[var(--aura-accent,#D4AF37)]"
+            >
+              ← Indietro
+            </button>
+            <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted">
+              Villa selezionata
+            </p>
+            <h2 className="mt-2 text-xl font-light tracking-wide md:text-2xl">
+              {villa?.name ?? "—"}
+            </h2>
+            <p className="mt-1 text-sm font-light text-text-secondary">
+              {villa?.location} · {villa?.refCode}
+            </p>
+
+            {screen === "role" && (
+              <div className="mt-10 grid gap-4 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setScreen("guest-auth");
+                  }}
+                  className={`${gatePrimaryClass} py-8 text-center`}
+                >
+                  Sono un Ospite di questa Villa
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setScreen("staff-auth");
+                  }}
+                  className={`${gateSecondaryClass} py-8 text-center`}
+                >
+                  Sono dello Staff / Agenzia
+                </button>
+              </div>
+            )}
+
+            {screen === "guest-auth" && (
+              <form onSubmit={handleGuestSubmit} className="mt-10 max-w-md space-y-5">
+                <div>
+                  <label className={gateLabelClass} htmlFor="gate-guest-name">
+                    Il tuo Nome
+                  </label>
+                  <input
+                    id="gate-guest-name"
+                    type="text"
+                    required
+                    autoComplete="name"
+                    value={guestName}
+                    onChange={(e) => setGuestName(e.target.value)}
+                    className={gateInputClass}
+                    placeholder="Nome e cognome"
+                  />
+                </div>
+                <div>
+                  <label className={gateLabelClass} htmlFor="gate-stay-pin">
+                    PIN Soggiorno
+                  </label>
+                  <input
+                    id="gate-stay-pin"
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={4}
+                    required
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value)}
+                    className={`${gateInputClass} tracking-[0.4em]`}
+                    placeholder="••••"
+                  />
+                </div>
+                {error && (
+                  <p className="text-xs font-light text-red-300/80" role="alert">
+                    {error}
+                  </p>
+                )}
+                <button type="submit" className={gatePrimaryClass}>
+                  Entra nella villa
+                </button>
+              </form>
+            )}
+
+            {screen === "staff-auth" && (
+              <form onSubmit={handleStaffSubmit} className="mt-10 max-w-md space-y-5">
+                <div>
+                  <label className={gateLabelClass} htmlFor="gate-staff-password">
+                    Password Staff
+                  </label>
+                  <input
+                    id="gate-staff-password"
+                    type="password"
+                    required
+                    value={staffPassword}
+                    onChange={(e) => setStaffPassword(e.target.value)}
+                    className={gateInputClass}
+                    placeholder="••••••••"
+                  />
+                </div>
+                {error && (
+                  <p className="text-xs font-light text-red-300/80" role="alert">
+                    {error}
+                  </p>
+                )}
+                <button type="submit" className={gatePrimaryClass}>
+                  Accedi alla dashboard
+                </button>
+              </form>
+            )}
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}
+
 // ── Header ───────────────────────────────────────────────────────────────────
 
 function Header({
+  mode,
   property,
   properties: propertyList,
   activePropertyId,
   onSwitchProperty,
+  guestName,
+  onSignOut,
 }: {
+  mode: AppMode;
   property: Property;
   properties: Property[];
   activePropertyId: string;
   onSwitchProperty: (id: string) => void;
+  guestName: string;
+  onSignOut: () => void;
 }) {
   return (
     <header className="border-b border-border px-6 py-8 md:px-12 lg:px-24">
@@ -586,21 +1102,25 @@ function Header({
             {agencyConfig.agencyName}
           </span>
         </div>
-        <div className="flex items-center gap-3">
-          {/* Property switcher */}
-          <div className="relative">
-            <select
-              aria-label="Switch active property"
-              value={activePropertyId}
-              onChange={(e) => onSwitchProperty(e.target.value)}
-              className="cursor-pointer appearance-none rounded-full border border-border bg-charcoal py-2 pl-4 pr-9 text-xs font-light tracking-[0.12em] text-text-secondary transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-text-primary focus:outline-none focus-visible:border-[var(--aura-accent,#D4AF37)]"
-            >
-              {propertyList.map((p) => (
-                <option key={p.id} value={p.id} className="bg-charcoal text-text-primary">
-                  {p.id === activePropertyId ? `✓ ${p.name}` : p.name}
+        <div className="flex flex-wrap items-center gap-3">
+          {mode === "staff" ? (
+            /* Property switcher — staff only; "Tutte le Ville" aggregates */
+            <div className="relative">
+              <select
+                aria-label="Switch active property"
+                value={activePropertyId}
+                onChange={(e) => onSwitchProperty(e.target.value)}
+                className="cursor-pointer appearance-none rounded-full border border-border bg-charcoal py-2 pl-4 pr-9 text-xs font-light tracking-[0.12em] text-text-secondary transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-text-primary focus:outline-none focus-visible:border-[var(--aura-accent,#D4AF37)]"
+              >
+                <option value={ALL_VILLAS} className="bg-charcoal text-text-primary">
+                  {activePropertyId === ALL_VILLAS ? "✓ Tutte le Ville" : "Tutte le Ville"}
                 </option>
-              ))}
-            </select>
+                {propertyList.map((p) => (
+                  <option key={p.id} value={p.id} className="bg-charcoal text-text-primary">
+                    {p.id === activePropertyId ? `✓ ${p.name}` : p.name}
+                  </option>
+                ))}
+              </select>
             <svg
               width="10"
               height="10"
@@ -613,9 +1133,22 @@ function Header({
               className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-text-muted"
               aria-hidden="true"
             >
-              <path d="M2 4.5L6 8.5L10 4.5" />
-            </svg>
-          </div>
+                <path d="M2 4.5L6 8.5L10 4.5" />
+              </svg>
+            </div>
+          ) : (
+            /* Guest: bound to their villa — no switcher, just the stay identity */
+            <span className="rounded-full border border-border px-4 py-2 text-xs font-light tracking-[0.12em] text-text-secondary">
+              {guestName}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="cursor-pointer rounded-full border border-border px-4 py-2 text-[10px] font-medium uppercase tracking-[0.15em] text-text-muted transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)] hover:text-[var(--aura-accent,#D4AF37)]"
+          >
+            Esci
+          </button>
         </div>
       </div>
 
@@ -636,14 +1169,18 @@ function Header({
 // ── Tab Bar ──────────────────────────────────────────────────────────────────
 
 function TabBar({
+  mode,
   activeTab,
   onTabChange,
   pendingCount = 0,
 }: {
+  mode: AppMode;
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
   pendingCount?: number;
 }) {
+  // Only the active mode's tabs exist — the guest DOM has no staff tab at all.
+  const tabs = mode === "guest" ? guestTabs : staffTabs;
   return (
     <nav className="border-b border-border" role="tablist">
       <div className="flex overflow-x-auto scrollbar-hide px-6 md:px-12 lg:px-24">
@@ -708,6 +1245,9 @@ function TabBar({
 // ── Tab Panels ───────────────────────────────────────────────────────────────
 
 function TabPanels({
+  mode,
+  guestSession,
+  activeVillaId,
   activeTab,
   activeProperty,
   properties,
@@ -730,6 +1270,9 @@ function TabPanels({
   onDeleteSupplier,
   onRetrySuppliers,
 }: {
+  mode: AppMode;
+  guestSession: GuestSession | null;
+  activeVillaId: string;
   activeTab: Tab;
   activeProperty: Property;
   properties: Property[];
@@ -752,6 +1295,7 @@ function TabPanels({
   onDeleteSupplier: (id: string) => void;
   onRetrySuppliers: () => void;
 }) {
+  const tabs = mode === "guest" ? guestTabs : staffTabs;
   return (
     <main className="flex-1 px-6 py-10 md:px-12 md:py-14 lg:px-24 lg:py-16">
       <div className="relative">
@@ -782,11 +1326,17 @@ function TabPanels({
                 <ServicesPanel
                   onAddTask={onAddTask}
                   activeProperty={activeProperty}
-                  guestRequests={guestRequests}
-                  requestsStorageError={requestsStorageError}
                   onCreateRequest={onCreateRequest}
-                  onRetryRequests={onRetryRequests}
                 />
+              ) : tab.id === "my-services" ? (
+                guestSession ? (
+                  <MyServicesPanel
+                    guestSession={guestSession}
+                    guestRequests={guestRequests}
+                    requestsStorageError={requestsStorageError}
+                    onRetryRequests={onRetryRequests}
+                  />
+                ) : null
               ) : tab.id === "staff" ? (
                 <StaffPanel
                   tasks={tasks}
@@ -797,12 +1347,14 @@ function TabPanels({
                   onUpdateRequestStatus={onUpdateRequestStatus}
                   onRetryRequests={onRetryRequests}
                   suppliers={suppliers}
+                  activeVillaId={activeVillaId}
                 />
               ) : tab.id === "agency" ? (
                 <AgencyPanel
                   guestRequests={guestRequests}
                   requestsStorageError={requestsStorageError}
                   onRetryRequests={onRetryRequests}
+                  activeVillaId={activeVillaId}
                   suppliers={suppliers}
                   suppliersStorageError={suppliersStorageError}
                   onAddSupplier={onAddSupplier}
@@ -2115,6 +2667,7 @@ function StaffPanel({
   onUpdateRequestStatus,
   onRetryRequests,
   suppliers,
+  activeVillaId,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
@@ -2124,6 +2677,8 @@ function StaffPanel({
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
   suppliers: Supplier[];
+  /** Active switcher value: a villa id, or ALL_VILLAS for the aggregate view. */
+  activeVillaId: string;
 }) {
   const completedCount = tasks.filter(
     (t) => t.status === "confirmed" || t.status === "completed",
@@ -2190,6 +2745,7 @@ function StaffPanel({
         onUpdateRequestStatus={onUpdateRequestStatus}
         onRetryRequests={onRetryRequests}
         suppliers={suppliers}
+        activeVillaId={activeVillaId}
       />
     </div>
   );
@@ -2235,6 +2791,7 @@ function StaffRequestsSection({
   onUpdateRequestStatus,
   onRetryRequests,
   suppliers,
+  activeVillaId,
 }: {
   guestRequests: GuestRequest[];
   requestsStorageError: boolean;
@@ -2242,20 +2799,27 @@ function StaffRequestsSection({
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
   suppliers: Supplier[];
+  /** Active switcher value: a villa id, or ALL_VILLAS for the aggregate view. */
+  activeVillaId: string;
 }) {
   const [filter, setFilter] = useState<RequestFilter>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  // Newest first — a request that just came in sits at the top of the list.
+  // Villa-scoped first, then newest first — a request that just came in sits at
+  // the top of the list.
+  const villaRequests = useMemo(
+    () => guestRequests.filter((r) => requestMatchesVilla(r, activeVillaId)),
+    [guestRequests, activeVillaId],
+  );
   const sorted = useMemo(
     () =>
-      [...guestRequests].sort((a, b) =>
+      [...villaRequests].sort((a, b) =>
         a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
       ),
-    [guestRequests],
+    [villaRequests],
   );
   const counts = useMemo(() => {
     const acc: Record<RequestFilter, number> = {
-      all: guestRequests.length,
+      all: villaRequests.length,
       received: 0,
       in_progress: 0,
       confirmed: 0,
@@ -2838,6 +3402,11 @@ function TaskCard({
   const guestMatch = task.description.match(/(\d+)\s*guests?/i);
   const roomMatch = task.description.match(/(master|guest|bed)\s*(suite|room|bedroom)/i);
   const contextBadge = guestMatch ? `${guestMatch[1]} guests` : null;
+  // Only set on the flattened "Tutte le Ville" view, where rows from several
+  // villas sit side by side and each must say which villa it belongs to.
+  const villaLabel = task.villaId
+    ? properties.find((p) => p.id === task.villaId)?.name
+    : undefined;
   const contextRoom = roomMatch ? roomMatch[0] : null;
 
   // Action label based on status
@@ -2991,6 +3560,17 @@ function TaskCard({
               {contextRoom && ` · ${contextRoom}`}
             </span>
           )}
+          {villaLabel && (
+            <span
+              className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-medium tracking-[0.1em]"
+              style={{
+                borderColor: "var(--aura-accent, #D4AF37)",
+                color: "var(--aura-accent, #D4AF37)",
+              }}
+            >
+              {villaLabel}
+            </span>
+          )}
           {isCompleted && task.completedAt && (
             <span className="text-[10px] font-light text-text-muted/70">
               Completed: {task.completedAt}
@@ -3026,17 +3606,11 @@ function TaskCard({
 function ServicesPanel({
   onAddTask,
   activeProperty,
-  guestRequests,
-  requestsStorageError,
   onCreateRequest,
-  onRetryRequests,
 }: {
   onAddTask: (task: TaskItem) => void;
   activeProperty: Property;
-  guestRequests: GuestRequest[];
-  requestsStorageError: boolean;
   onCreateRequest: (serviceType: string) => void;
-  onRetryRequests: () => void;
 }) {
   const [bookingService, setBookingService] = useState<ConciergeService | null>(null);
 
@@ -3071,44 +3645,6 @@ function ServicesPanel({
         ))}
       </div>
 
-      {/* Your Requests — guest-facing request timeline */}
-      <div className="mt-12">
-        <h3 className="text-lg font-light tracking-wide text-text-primary md:text-xl">
-          Your Requests
-        </h3>
-        <p className="mt-1 text-sm font-light text-text-muted">
-          Every request is passed to our staff, who confirm it with you.
-        </p>
-
-        {requestsStorageError && (
-          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3" style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}>
-            <p className="text-xs font-light text-text-secondary">
-              We couldn't load your requests. Please try again.
-            </p>
-            <button
-              onClick={onRetryRequests}
-              className="cursor-pointer rounded-md border border-[var(--aura-accent,#D4AF37)] px-3 py-1 text-[11px] font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-colors duration-200 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {guestRequests.length === 0 ? (
-          <div className="mt-4 rounded-2xl border border-border px-6 py-8 text-center" style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}>
-            <p className="text-sm font-light text-text-muted">
-              No requests yet — choose a service above and we'll pass it to our staff.
-            </p>
-          </div>
-        ) : (
-          <div className="mt-4 space-y-4">
-            {guestRequests.map((request) => (
-              <GuestRequestCard key={request.id} request={request} />
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* Request Modal */}
       {bookingService && (
         <BookingModal
@@ -3123,87 +3659,124 @@ function ServicesPanel({
   );
 }
 
-// ── Guest Request Card — status + lifecycle timeline ──────────────────────────
-function GuestRequestCard({ request }: { request: GuestRequest }) {
-  const isCancelled = request.status === "cancelled";
-  const currentIndex = GUEST_REQUEST_STEPS.indexOf(
-    request.status as Exclude<GuestRequestStatus, "cancelled">,
+// ── I Miei Servizi — the guest's cart / stay summary ─────────────────────────
+/**
+ * Everything the guest asked for during THIS stay (matched on the session id
+ * stamped at request creation), newest first, with a stay total over the priced
+ * entries. Requests from an earlier stay never leak in here.
+ */
+function MyServicesPanel({
+  guestSession,
+  guestRequests,
+  requestsStorageError,
+  onRetryRequests,
+}: {
+  guestSession: GuestSession;
+  guestRequests: GuestRequest[];
+  requestsStorageError: boolean;
+  onRetryRequests: () => void;
+}) {
+  const stayRequests = useMemo(
+    () =>
+      guestRequests
+        .filter((r) => r.guestSessionId === guestSession.sessionId)
+        .sort((a, b) =>
+          a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+        ),
+    [guestRequests, guestSession.sessionId],
   );
-  const created = new Date(request.createdAt);
-  const createdLabel = isNaN(created.getTime())
-    ? request.createdAt
-    : created.toLocaleString();
-  const isDone = request.status === "confirmed" || request.status === "completed";
+  const stayTotal = stayRequests.reduce((sum, r) => sum + (r.price ?? 0), 0);
   return (
-    <div className="rounded-2xl border border-border bg-charcoal p-5 md:p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium tracking-wide text-text-primary">
-            {request.serviceType}
+    <div className="rounded-2xl border border-border bg-charcoal p-8 md:p-10 lg:p-12">
+      <div className="mb-10">
+        <h2
+          className="text-2xl font-light tracking-wide md:text-3xl"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          I Miei Servizi
+        </h2>
+        <p className="mt-2 font-light text-text-secondary">
+          Il tuo soggiorno, in un unico posto
+        </p>
+        <div
+          className="mt-6 h-px w-24"
+          style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
+        />
+      </div>
+
+      {requestsStorageError && (
+        <div
+          className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <p className="text-xs font-light text-text-secondary">
+            We couldn't load your requests. Please try again.
           </p>
-          <p className="mt-1 text-xs font-light text-text-muted">
-            {request.villaName} · {createdLabel}
+          <button
+            onClick={onRetryRequests}
+            className="cursor-pointer rounded-md border border-[var(--aura-accent,#D4AF37)] px-3 py-1 text-[11px] font-medium tracking-wider text-[var(--aura-accent,#D4AF37)] transition-colors duration-200 hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {stayRequests.length === 0 ? (
+        <div
+          className="rounded-2xl border border-dashed border-border px-6 py-12 text-center"
+          style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+        >
+          <span className="text-3xl opacity-30" aria-hidden="true">
+            🛒
+          </span>
+          <p className="mt-4 text-sm font-light tracking-wide text-text-muted">
+            Nessun servizio richiesto in questo soggiorno
           </p>
         </div>
-        <span
-          className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ${
-            isDone ? "" : "text-text-muted"
-          }`}
-          style={{
-            borderColor: isDone ? "var(--aura-accent, #D4AF37)" : "#2A2A2A",
-            color: isDone ? "var(--aura-accent, #D4AF37)" : undefined,
-          }}
-        >
-          {GUEST_REQUEST_LABELS[request.status]}
-        </span>
-      </div>
-      {isCancelled ? (
-        <p className="mt-4 text-xs font-light text-text-muted">
-          This request was cancelled — please submit a new one if you still need it.
-        </p>
       ) : (
-        <div className="mt-5 flex items-start">
-          {GUEST_REQUEST_STEPS.map((step, idx) => {
-            const reached = idx <= currentIndex;
-            return (
-              <div
-                key={step}
-                className={`flex items-center ${idx === GUEST_REQUEST_STEPS.length - 1 ? "" : "flex-1"}`}
-              >
-                <div className="flex flex-col items-center gap-1.5">
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{
-                      backgroundColor: reached
-                        ? "var(--aura-accent, #D4AF37)"
-                        : "#2A2A2A",
-                    }}
-                  />
-                  <span
-                    className={`whitespace-nowrap text-[9px] uppercase tracking-wider ${
-                      reached ? "text-[var(--aura-accent,#D4AF37)]" : "text-text-muted"
-                    }`}
-                  >
-                    {GUEST_REQUEST_LABELS[step]}
-                  </span>
-                </div>
-                {idx < GUEST_REQUEST_STEPS.length - 1 && (
-                  <span
-                    className="mx-2 mb-4 h-px flex-1"
-                    style={{
-                      backgroundColor:
-                        idx < currentIndex ? "var(--aura-accent, #D4AF37)" : "#2A2A2A",
-                    }}
-                  />
-                )}
+        <div className="space-y-3">
+          {stayRequests.map((request) => (
+            <div
+              key={request.id}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border px-4 py-4 transition-colors duration-300 hover:border-[var(--aura-accent,#D4AF37)]"
+              style={{ backgroundColor: "var(--aura-surface, #0B0B0B)" }}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-light text-text-primary">
+                  {request.serviceType}
+                </p>
+                <p className="mt-1 text-[11px] font-light tracking-[0.1em] text-text-muted">
+                  {formatRequestStamp(request.createdAt)}
+                </p>
               </div>
-            );
-          })}
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-light text-text-secondary">
+                  {formatRequestAmount(request.price)}
+                </span>
+                <span className={requestStatusBadge(request.status)}>
+                  {GUEST_REQUEST_LABELS[request.status]}
+                </span>
+              </div>
+            </div>
+          ))}
+
+          <div className="flex items-center justify-between border-t border-border px-1 pt-5">
+            <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted">
+              Totale soggiorno
+            </span>
+            <span
+              className="text-lg font-light tracking-wide"
+              style={{ color: "var(--aura-accent, #D4AF37)" }}
+            >
+              {formatRequestAmount(stayTotal)}
+            </span>
+          </div>
         </div>
       )}
     </div>
   );
 }
+
 // ── Service Card ──────────────────────────────────────────────────────────────
 
 function ServiceCard({
@@ -3505,7 +4078,7 @@ function BookingModal({
               once it's confirmed.
             </p>
             <p className="text-[10px] font-light text-text-muted/60">
-              Follow the status under Services → Your Requests.
+              Follow the status under 🛒 I Miei Servizi.
             </p>
             <button
               onClick={handleClose}
@@ -4308,6 +4881,7 @@ function AgencyPanel({
   guestRequests,
   requestsStorageError,
   onRetryRequests,
+  activeVillaId,
   suppliers,
   suppliersStorageError,
   onAddSupplier,
@@ -4318,6 +4892,8 @@ function AgencyPanel({
   guestRequests: GuestRequest[];
   requestsStorageError: boolean;
   onRetryRequests: () => void;
+  /** Active switcher value: a villa id, or ALL_VILLAS for the aggregate view. */
+  activeVillaId: string;
   suppliers: Supplier[];
   suppliersStorageError: boolean;
   onAddSupplier: (draft: Omit<Supplier, "id">) => void;
@@ -4331,13 +4907,14 @@ function AgencyPanel({
     () =>
       guestRequests
         .filter((r) => r.status === "confirmed" || r.status === "completed")
+        .filter((r) => requestMatchesVilla(r, activeVillaId))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
         .map((request) => ({
           request,
           supplierName: supplierNameById(suppliers, request.supplierId),
           split: splitRequestAmounts(request.price, request.agencyPct, request.auraPct),
         })),
-    [guestRequests, suppliers],
+    [guestRequests, suppliers, activeVillaId],
   );
 
   // Totals are the sum of the rows rendered above — a row with no recorded
