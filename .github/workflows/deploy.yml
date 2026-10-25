@@ -29,6 +29,14 @@ jobs:
         run: bun install
 
       - name: Build (Vercel Build Output API)
+        env:
+          # Optional: when these secrets are absent they resolve to empty strings
+          # and the app builds in local (localStorage) mode exactly as before.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # Bare-name fallbacks, in case the values are stored under these names.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: bash build-vercel.sh
 
       - name: Deploy to Vercel (production)

@@ -15,6 +15,19 @@ import {
   toCsv,
   type ConciergeService,
 } from "../data/config";
+import {
+  archiveRequestsForVilla,
+  closeSessionsForVilla,
+  createRequest,
+  isCloudMode,
+  listRequests,
+  listSessions,
+  openSession,
+  subscribeRequests,
+  subscribeSessions,
+  updateRequest,
+} from "../lib/realtime";
+import { playStaffChime } from "../lib/chime";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -100,15 +113,18 @@ interface GuestRequest {
   guestSessionId?: string | null;
   /** Villa the request belongs to (null on legacy rows with no villa). */
   villaId?: string | null;
+  /** True once the stay was concluded — hidden from live staff views, never deleted. */
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
 }
+// Display labels only — the internal status values below never change.
 const GUEST_REQUEST_LABELS: Record<GuestRequestStatus, string> = {
-  received: "Received",
-  in_progress: "In progress",
-  confirmed: "Confirmed",
-  completed: "Completed",
-  cancelled: "Cancelled",
+  received: "Pendente",
+  in_progress: "Pendente",
+  confirmed: "Confermata",
+  completed: "Completata",
+  cancelled: "Cancellata",
 };
 const GUEST_REQUEST_STATUSES: GuestRequestStatus[] = [
   "received",
@@ -166,6 +182,7 @@ function normalizeGuestRequest(raw: unknown): GuestRequest | null {
     typeof row.price === "number" && Number.isFinite(row.price) ? row.price : null;
   return {
     id,
+    archived: row.archived === true,
     guestName:
       typeof row.guestName === "string" && row.guestName ? row.guestName : "Guest",
     villaName,
@@ -199,6 +216,28 @@ interface Supplier {
  * Normalise one persisted supplier row. Rows with no id or no name are dropped
  * (return null) so a corrupt entry can never render an empty card.
  */
+/**
+ * Merge cloud rows into the local view by id (cloud wins), newest first — this
+ * is what keeps the guest app's offline-created rows visible when it comes back
+ * online, and what prevents duplicates when an optimistic row is echoed back by
+ * the realtime subscription.
+ */
+function mergeGuestRequests(
+  existing: GuestRequest[],
+  incoming: GuestRequest[],
+): GuestRequest[] {
+  const byId = new Map<string, GuestRequest>();
+  for (const row of incoming) byId.set(row.id, row);
+  for (const row of existing) if (!byId.has(row.id)) byId.set(row.id, row);
+  return [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Agency commission for one request (0 when no price has been recorded). */
+function agencyCommissionFor(request: GuestRequest): number | null {
+  if (request.price === null) return null;
+  return (request.price * revenueConfig.agencyCommissionPct) / 100;
+}
+
 function normalizeSupplier(raw: unknown): Supplier | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
@@ -647,6 +686,9 @@ function Home() {
         updatedAt: now,
       };
       setGuestRequests((prev) => [request, ...prev]);
+      // Durable write through the realtime seam: Supabase in cloud mode, the
+      // local store otherwise. The optimistic state above keeps it instant.
+      void createRequest(request);
     },
     [activePropertyId, guestSession],
   );
@@ -654,11 +696,12 @@ function Home() {
   // Every edit stamps updatedAt, so the staff list shows when a request moved.
   const handleUpdateRequest = useCallback(
     (id: string, patch: Partial<GuestRequest>) => {
+      const updatedAt = new Date().toISOString();
       setGuestRequests((prev) =>
-        prev.map((r) =>
-          r.id === id ? { ...r, ...patch, updatedAt: new Date().toISOString() } : r,
-        ),
+        prev.map((r) => (r.id === id ? { ...r, ...patch, updatedAt } : r)),
       );
+      // Status/supplier/price/note changes reach the guest app live.
+      void updateRequest(id, { ...patch, updatedAt });
     },
     [],
   );
@@ -696,6 +739,14 @@ function Home() {
   // ── Gate handlers ─────────────────────────────────────────────────────────
   const handleGuestEnter = useCallback((session: GuestSession) => {
     writeGuestSession(session);
+    // The stay session is the handle staff use to conclude the stay later.
+    void openSession({
+      sessionId: session.sessionId,
+      villaId: session.villaId,
+      guestName: session.guestName,
+      startedAt: session.startedAt,
+      closedAt: null,
+    });
     setGuestSession(session);
     setMode("guest");
     setActivePropertyId(session.villaId);
@@ -714,6 +765,95 @@ function Home() {
     setGuestSession(null);
     setMode(null);
     setActiveTab("concierge");
+  }, []);
+
+  // ── Realtime sync (Supabase in cloud mode, inert in local mode) ───────────
+  // The UI above only reads state and calls the handlers below; every cloud
+  // code path goes through src/lib/realtime.ts.
+  const guestRequestsRef = useRef(guestRequests);
+  const guestSessionRef = useRef(guestSession);
+  const modeRef = useRef(mode);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    guestRequestsRef.current = guestRequests;
+    guestSessionRef.current = guestSession;
+    modeRef.current = mode;
+  });
+
+  /** Staff cue for a request that arrived from another device. */
+  const announceIncomingRequest = useCallback((request: GuestRequest) => {
+    setToast(`Nuova richiesta — ${request.serviceType} — ${request.villaName}`);
+    playStaffChime();
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 6000);
+  }, []);
+
+  /**
+   * The staff concluded this stay: drop the local session and return to the
+   * name + PIN entry form, live and without a reload.
+   */
+  const handleStayConcluded = useCallback(() => {
+    clearGuestSession();
+    setGuestSession(null);
+    setMode(null);
+    setActiveTab("concierge");
+  }, []);
+
+  useEffect(() => {
+    if (!isCloudMode()) return;
+    let cancelled = false;
+
+    const checkOwnSession = (rows: { sessionId: string; closedAt: string | null }[]) => {
+      const active = guestSessionRef.current;
+      if (!active) return;
+      const mine = rows.find((s) => s.sessionId === active.sessionId);
+      if (mine && mine.closedAt) handleStayConcluded();
+    };
+
+    void listRequests(null).then((rows) => {
+      if (cancelled || rows.length === 0) return;
+      setGuestRequests((prev) => mergeGuestRequests(prev, rows as GuestRequest[]));
+    });
+    void listSessions(null).then((rows) => {
+      if (!cancelled) checkOwnSession(rows);
+    });
+
+    const unsubscribeRequests = subscribeRequests((rows) => {
+      if (cancelled) return;
+      const known = new Set(guestRequestsRef.current.map((r) => r.id));
+      const fresh = (rows as GuestRequest[]).filter((r) => !known.has(r.id));
+      setGuestRequests((prev) => mergeGuestRequests(prev, rows as GuestRequest[]));
+      if (modeRef.current === "staff" && fresh.length > 0) {
+        announceIncomingRequest(fresh[0]);
+      }
+    });
+    const unsubscribeSessions = subscribeSessions((rows) => {
+      if (!cancelled) checkOwnSession(rows);
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribeRequests();
+      unsubscribeSessions();
+    };
+  }, [announceIncomingRequest, handleStayConcluded]);
+
+  /**
+   * "Concludi Soggiorno / Reset Villa" — archive, never delete: the villa's open
+   * sessions are closed and its live requests are archived. Revenue keeps
+   * counting every row; only the live staff views stop showing them.
+   */
+  const handleConcludeStay = useCallback((villaId: string) => {
+    if (villaId === ALL_VILLAS) return;
+    void closeSessionsForVilla(villaId);
+    void archiveRequestsForVilla(villaId);
+    const updatedAt = new Date().toISOString();
+    setGuestRequests((prev) =>
+      prev.map((r) => (r.villaId === villaId ? { ...r, archived: true, updatedAt } : r)),
+    );
+    setToast("Soggiorno concluso — la villa è pronta per il prossimo ospite");
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 5000);
   }, []);
 
   // No role chosen yet: the entry flow is the whole page.
@@ -745,6 +885,7 @@ function Home() {
       }
     >
       <Header
+        onConcludeStay={handleConcludeStay}
         mode={mode}
         property={scopeProperty}
         properties={properties}
@@ -1066,6 +1207,7 @@ function Header({
   onSwitchProperty,
   guestName,
   onSignOut,
+  onConcludeStay,
 }: {
   mode: AppMode;
   property: Property;
@@ -1074,6 +1216,8 @@ function Header({
   onSwitchProperty: (id: string) => void;
   guestName: string;
   onSignOut: () => void;
+  /** Archives the selected villa's stay — disabled for "Tutte le Ville". */
+  onConcludeStay: (villaId: string) => void;
 }) {
   return (
     <header className="border-b border-border px-6 py-8 md:px-12 lg:px-24">
@@ -1141,6 +1285,44 @@ function Header({
             <span className="rounded-full border border-border px-4 py-2 text-xs font-light tracking-[0.12em] text-text-secondary">
               {guestName}
             </span>
+          )}
+          {mode === "staff" && (
+            /* Operational reset — archiving only, never a delete. */
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const villa = propertyList.find((p) => p.id === activePropertyId);
+                  const label = villa ? villa.name : activePropertyId;
+                  const confirmed = window.confirm(
+                    `Concludere il soggiorno per ${label}?\n\n` +
+                      "La sessione dell'ospite verrà archiviata e l'ospite tornerà alla " +
+                      "schermata di accesso (Nome + PIN). Le richieste della villa verranno " +
+                      "archiviate: non saranno più visibili nelle viste operative, ma i " +
+                      "ricavi restano conteggiati in modo permanente. Nessun dato viene eliminato.",
+                  );
+                  if (confirmed) onConcludeStay(activePropertyId);
+                }}
+                disabled={activePropertyId === ALL_VILLAS}
+                title={
+                  activePropertyId === ALL_VILLAS
+                    ? "Seleziona una villa"
+                    : "Concludi il soggiorno e archivia le richieste della villa"
+                }
+                className={`cursor-pointer rounded-full border px-4 py-2 text-[10px] font-medium uppercase tracking-[0.15em] transition-colors duration-300 ${
+                  activePropertyId === ALL_VILLAS
+                    ? "cursor-not-allowed border-border text-text-muted opacity-40"
+                    : "border-[var(--aura-accent,#D4AF37)] text-[var(--aura-accent,#D4AF37)] hover:bg-[var(--aura-accent,#D4AF37)] hover:text-midnight"
+                }`}
+              >
+                Concludi Soggiorno / Reset Villa
+              </button>
+              {activePropertyId === ALL_VILLAS && (
+                <span className="text-[10px] font-light tracking-wide text-text-muted">
+                  Seleziona una villa
+                </span>
+              )}
+            </div>
           )}
           <button
             type="button"
@@ -2807,7 +2989,10 @@ function StaffRequestsSection({
   // Villa-scoped first, then newest first — a request that just came in sits at
   // the top of the list.
   const villaRequests = useMemo(
-    () => guestRequests.filter((r) => requestMatchesVilla(r, activeVillaId)),
+    () =>
+      guestRequests.filter(
+        (r) => !r.archived && requestMatchesVilla(r, activeVillaId),
+      ),
     [guestRequests, activeVillaId],
   );
   const sorted = useMemo(
@@ -2962,6 +3147,21 @@ function StaffRequestRow({
           </p>
           <p className="mt-0.5 truncate text-[10px] font-light text-text-muted">
             {request.villaName}
+          </p>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-light text-text-muted">
+            <span>
+              Prezzo totale:{" "}
+              <span className="tracking-wide" style={{ color: "var(--aura-accent, #D4AF37)" }}>
+                {formatRequestAmount(request.price)}
+              </span>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              Commissione agenzia ({revenueConfig.agencyCommissionPct}%):{" "}
+              <span className="tracking-wide" style={{ color: "var(--aura-accent, #D4AF37)" }}>
+                {formatRequestAmount(agencyCommissionFor(request))}
+              </span>
+            </span>
           </p>
           <p className="mt-0.5 truncate text-[10px] font-light text-text-muted">
             Supplier: {supplierNameById(suppliers, request.supplierId)}
@@ -4907,6 +5107,7 @@ function AgencyPanel({
     () =>
       guestRequests
         .filter((r) => r.status === "confirmed" || r.status === "completed")
+        .filter((r) => !r.archived) // concluded stays are counted in Revenue, not in the live Agency table
         .filter((r) => requestMatchesVilla(r, activeVillaId))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
         .map((request) => ({
