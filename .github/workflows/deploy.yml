@@ -30,13 +30,13 @@ jobs:
 
       - name: Build (Vercel Build Output API)
         env:
-          # Optional: when these secrets are absent they resolve to empty strings
-          # and the app builds in local (localStorage) mode exactly as before.
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          # Bare-name fallbacks, in case the values are stored under these names.
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Supabase project URL + publishable key: public by design (they ship in
+          # every browser bundle; data security is enforced by RLS server-side).
+          # Owner-provided values, 2026-10-26 — the GH token cannot write Actions
+          # secrets, so they are set literally here. When absent the app still
+          # builds in local (localStorage) mode exactly as before.
+          VITE_SUPABASE_URL: https://kulxusyathtrkpxdeifj.supabase.co
+          VITE_SUPABASE_ANON_KEY: sb_publishable_b99crpgefEhaCzaT-HY-oA_b_P-4Khx
         run: bash build-vercel.sh
 
       - name: Deploy to Vercel (production)
