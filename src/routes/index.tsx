@@ -5107,6 +5107,7 @@ function AgencyPanel({
     () =>
       guestRequests
         .filter((r) => r.status === "confirmed" || r.status === "completed")
+        .filter((r) => !r.archived) // concluded stays are counted in Revenue, not in the live Agency table
         .filter((r) => requestMatchesVilla(r, activeVillaId))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
         .map((request) => ({
