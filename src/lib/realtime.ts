@@ -367,7 +367,13 @@ export async function listSessions(villaId: string | null): Promise<RealtimeSess
  * run against a database where that migration has not been executed yet, so an
  * insert that trips over them is retried ONCE without them (see createRequest).
  */
-const OPTIONAL_COLUMNS = ["details", "agency_commission", "platform_commission"] as const;
+const OPTIONAL_COLUMNS = [
+  "details",
+  "agency_pct",
+  "aura_pct",
+  "agency_commission",
+  "platform_commission",
+] as const;
 
 /** A copy of the row without the v2-only columns. */
 function withoutOptionalColumns(row: Row): Row {

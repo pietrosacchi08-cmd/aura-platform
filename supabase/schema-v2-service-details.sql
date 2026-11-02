@@ -67,6 +67,14 @@ alter table public.guest_requests
 
 alter table public.guest_requests
   add column if not exists platform_commission numeric null;
+-- The percentages applied when the request was submitted, recorded for audit:
+-- if the configured rates change later, older rows keep the rate they used.
+-- Nullable - legacy rows have no recorded rate and the app falls back to the
+-- current config when reading them.
+alter table public.guest_requests
+  add column if not exists agency_pct numeric null;
+alter table public.guest_requests
+  add column if not exists aura_pct numeric null;
 
 comment on column public.guest_requests.details is
   'Guest choices from the Services modals as jsonb, e.g. {"category":"yacht","duration":"full-day","departureTime":"10:00","skipper":true,"fuel":true,"total":3200}.';

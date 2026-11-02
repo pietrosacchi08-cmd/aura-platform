@@ -8,7 +8,7 @@
  *   • Luxury Transfer / Helicopter  → route, time, passengers, luggage
  *   • Wellness & Spa                → treatment, preferred date and time
  *
- * Every modal shows the full cost breakdown and a LIVE "TOTALE ESTIMATO" before
+ * Every modal shows the full cost breakdown and a live "TOTALE STIMATO" before
  * the guest presses "Conferma e Invia Richiesta". The estimate is an estimate:
  * the disclaimer says so, and the staff confirm the final amount.
  *
@@ -343,7 +343,7 @@ function CostSummary({ quote, footnote }: { quote: Quote; footnote?: string }) {
       </div>
       <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
         <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted">
-          TOTALE ESTIMATO
+          TOTALE STIMATO
         </span>
         <span className="text-lg font-light tracking-wide" style={{ color: ACCENT }}>
           {formatEuroIt(quote.total)}
