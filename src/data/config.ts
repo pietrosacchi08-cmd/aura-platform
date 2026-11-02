@@ -30,7 +30,7 @@ export interface ConciergeService {
   price: string;
   priceValue: number | null;
   cta: string;
-  icon: "yacht" | "chauffeur" | "catering" | "aviation";
+  icon: "yacht" | "chauffeur" | "catering" | "aviation" | "wellness";
 }
 
 export const conciergeServices: ConciergeService[] = [
@@ -70,6 +70,17 @@ export const conciergeServices: ConciergeService[] = [
     cta: "Request",
     icon: "aviation",
   },
+  {
+    // Wellness had no card of its own before the service modals; it is priced
+    // from servicePricing.wellness below.
+    id: "wellness",
+    title: "Wellness & Spa",
+    subtitle: "Spa treatments & personal training in villa",
+    price: "From €110",
+    priceValue: 110,
+    cta: "Request",
+    icon: "wellness",
+  },
 ];
 
 /** Illustrative imagery per service card. */
@@ -78,6 +89,110 @@ export const conciergeImages: Record<ConciergeService["icon"], string> = {
   chauffeur: "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?fit=crop&w=400&q=80",
   catering: "https://images.unsplash.com/photo-1414235077428-338989a2e8c0?fit=crop&w=400&q=80",
   aviation: "https://images.unsplash.com/photo-1540962351504-03099e0a754b?fit=crop&w=400&q=80",
+  wellness: "https://images.unsplash.com/photo-1544161515-4ab6ce6db874?fit=crop&w=400&q=80",
+};
+
+// ── Service request pricing (Services tab modals) ────────────────────────────
+// Single source of truth for the four interactive service modals. Every number
+// a guest sees is derived from this block (src/data/serviceDetails.ts), and the
+// live estimate shown before "Conferma e Invia Richiesta" is the amount that
+// gets recorded on the request. Change a value here and the modal, the summary
+// and the recorded price all follow — nothing is hard-coded in the UI.
+//
+// The values below are EXAMPLE values — set them to your own rate card.
+
+/** One selectable spa / training treatment. */
+export interface WellnessTreatment {
+  id: string;
+  label: string;
+  price: number;
+}
+
+export interface ServicePricing {
+  /** Boat charter / private yacht: per charter, plus optional extras. */
+  yacht: {
+    /** Mezza Giornata. */
+    halfDay: number;
+    /** Giornata Intera. */
+    fullDay: number;
+    /** Skipper incluso (optional extra, added to the charter price). */
+    skipper: number;
+    /** Carburante incluso (optional extra, added to the charter price). */
+    fuel: number;
+  };
+  /** Private chef: price per guest, by meal type. */
+  chef: {
+    /** Colazione — per guest. */
+    breakfast: number;
+    /** Pranzo — per guest. */
+    lunch: number;
+    /** Cena — per guest. */
+    dinner: number;
+    minGuests: number;
+    maxGuests: number;
+    defaultGuests: number;
+  };
+  /** Luxury transfer: base price + a supplement per passenger. */
+  transfer: {
+    base: number;
+    perPassenger: number;
+    maxPassengers: number;
+    defaultPassengers: number;
+    maxLuggage: number;
+  };
+  /** Helicopter: base price + a supplement per passenger. */
+  helicopter: {
+    base: number;
+    perPassenger: number;
+    maxPassengers: number;
+    defaultPassengers: number;
+    maxLuggage: number;
+  };
+  /** Wellness & spa / personal training: pick one treatment. */
+  wellness: {
+    treatments: WellnessTreatment[];
+    defaultTreatmentId: string;
+  };
+}
+
+export const servicePricing: ServicePricing = {
+  yacht: {
+    halfDay: 1400, // Mezza Giornata
+    fullDay: 2400, // Giornata Intera
+    skipper: 350, // skipper incluso
+    fuel: 450, // carburante incluso
+  },
+  chef: {
+    breakfast: 45, // Colazione, per ospite
+    lunch: 85, // Pranzo, per ospite
+    dinner: 120, // Cena, per ospite
+    minGuests: 1,
+    maxGuests: 24,
+    defaultGuests: 4,
+  },
+  transfer: {
+    base: 150, // base per il trasferimento
+    perPassenger: 15, // supplemento per passeggero
+    maxPassengers: 8,
+    defaultPassengers: 2,
+    maxLuggage: 12,
+  },
+  helicopter: {
+    base: 1800, // base per l'elicottero
+    perPassenger: 120, // supplemento per passeggero
+    maxPassengers: 6,
+    defaultPassengers: 2,
+    maxLuggage: 8,
+  },
+  wellness: {
+    treatments: [
+      { id: "massage-relax", label: "Massaggio relax", price: 110 },
+      { id: "massage-sport", label: "Massaggio sportivo", price: 130 },
+      { id: "facial", label: "Trattamento viso", price: 120 },
+      { id: "personal-trainer", label: "Personal trainer", price: 140 },
+    ],
+    defaultTreatmentId: "massage-relax",
+  },
 };
 
 // ── Revenue configuration ────────────────────────────────────────────────────
@@ -95,6 +210,9 @@ export const revenueConfig: {
   auraFeePct: number;
   /** Agency commission, as a percentage of the guest price. */
   agencyCommissionPct: number;
+  /** AURA platform commission recorded on every concierge request, as a
+   *  percentage of the estimated price (column `platform_commission`). */
+  platformCommissionPct: number;
   /** Supplier share, as a percentage of the guest price (indicative only — the
    *  supplier's share is always the remainder, see computeSplit). */
   supplierSharePct: number;
@@ -105,10 +223,33 @@ export const revenueConfig: {
 } = {
   auraFeePct: 3,           // example value
   agencyCommissionPct: 12, // example value
+  platformCommissionPct: 3, // example value — recorded per request (platform_commission)
   supplierSharePct: 85,    // example value
   supplierOverrides: {},
 };
 const roundCents = (value: number): number => Math.round(value * 100) / 100;
+
+/** Round to cents — the one rounding rule every money figure goes through. */
+export const round2 = (value: number): number => Math.round(value * 100) / 100;
+
+/**
+ * Agency commission RECORDED with a request: round2(price × agencyCommissionPct
+ * / 100). Null while no price is recorded, so a request without a price never
+ * carries a phantom commission.
+ */
+export function recordedAgencyCommission(price: number | null): number | null {
+  if (price === null || !Number.isFinite(price)) return null;
+  return round2((price * revenueConfig.agencyCommissionPct) / 100);
+}
+
+/**
+ * AURA platform commission RECORDED with a request:
+ * round2(price × platformCommissionPct / 100).
+ */
+export function recordedPlatformCommission(price: number | null): number | null {
+  if (price === null || !Number.isFinite(price)) return null;
+  return round2((price * revenueConfig.platformCommissionPct) / 100);
+}
 /**
  * Split a guest price into its three shares. Percentages come from the
  * per-supplier override when the supplier is listed, otherwise from
