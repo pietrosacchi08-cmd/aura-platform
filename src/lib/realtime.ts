@@ -16,6 +16,7 @@
  * lives in the UI, which only ever calls these functions.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { parseServiceDetails, type ServiceDetails } from "../data/serviceDetails";
 
 // ── App-facing shapes (structurally compatible with the UI's own models) ─────
 
@@ -32,11 +33,16 @@ export interface RealtimeRequest {
   guestName: string;
   villaName: string;
   serviceType: string;
-  details: string;
+  /** Structured guest choices from the Services modals (jsonb column `details`). */
+  details: ServiceDetails | null;
   status: RealtimeStatus;
   price: number | null;
   agencyPct: number;
   auraPct: number;
+  /** Agency commission recorded with the request (column `agency_commission`). */
+  agencyCommission: number | null;
+  /** AURA platform commission recorded with the request (column `platform_commission`). */
+  platformCommission: number | null;
   staffNote: string;
   supplierId: string | null;
   supplierName?: string | null;
@@ -115,9 +121,11 @@ function toRow(request: RealtimeRequest): Row {
     supplier_id: request.supplierId ?? null,
     supplier_name: request.supplierName ?? null,
     archived: request.archived === true,
-    details: request.details,
+    details: request.details ?? null,
     agency_pct: request.agencyPct,
     aura_pct: request.auraPct,
+    agency_commission: request.agencyCommission ?? null,
+    platform_commission: request.platformCommission ?? null,
     staff_note: request.staffNote,
     created_at: request.createdAt,
     updated_at: request.updatedAt,
@@ -140,6 +148,9 @@ function toRowPatch(patch: Partial<RealtimeRequest>): Row {
   if (patch.details !== undefined) row.details = patch.details;
   if (patch.agencyPct !== undefined) row.agency_pct = patch.agencyPct;
   if (patch.auraPct !== undefined) row.aura_pct = patch.auraPct;
+  if (patch.agencyCommission !== undefined) row.agency_commission = patch.agencyCommission;
+  if (patch.platformCommission !== undefined)
+    row.platform_commission = patch.platformCommission;
   if (patch.staffNote !== undefined) row.staff_note = patch.staffNote;
   return row;
 }
@@ -149,6 +160,16 @@ function str(value: unknown, fallback = ""): string {
 }
 function num(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+/** A numeric column that is genuinely nullable (commissions, price). */
+function numOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  // PostgREST returns `numeric` as a string in some configurations.
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 function fromRow(raw: Row): RealtimeRequest | null {
@@ -161,11 +182,13 @@ function fromRow(raw: Row): RealtimeRequest | null {
     guestName: str(raw.guest_name, "Guest"),
     villaName: str(raw.villa_name, "—"),
     serviceType: str(raw.service_label, "Concierge request"),
-    details: str(raw.details),
+    details: parseServiceDetails(raw.details),
     status,
-    price: typeof raw.price === "number" && Number.isFinite(raw.price) ? raw.price : null,
+    price: numOrNull(raw.price),
     agencyPct: num(raw.agency_pct, 0),
     auraPct: num(raw.aura_pct, 0),
+    agencyCommission: numOrNull(raw.agency_commission),
+    platformCommission: numOrNull(raw.platform_commission),
     staffNote: str(raw.staff_note),
     supplierId: typeof raw.supplier_id === "string" && raw.supplier_id ? raw.supplier_id : null,
     supplierName: typeof raw.supplier_name === "string" ? raw.supplier_name : null,
@@ -222,11 +245,13 @@ function fromLocalRequest(raw: Row): RealtimeRequest | null {
     guestName: str(raw.guestName, "Guest"),
     villaName: str(raw.villaName, "—"),
     serviceType: str(raw.serviceType, "Concierge request"),
-    details: str(raw.details),
+    details: parseServiceDetails(raw.details),
     status: str(raw.status, "received") as RealtimeStatus,
-    price: typeof raw.price === "number" ? raw.price : null,
+    price: numOrNull(raw.price),
     agencyPct: num(raw.agencyPct, 0),
     auraPct: num(raw.auraPct, 0),
+    agencyCommission: numOrNull(raw.agencyCommission),
+    platformCommission: numOrNull(raw.platformCommission),
     staffNote: str(raw.staffNote),
     supplierId: typeof raw.supplierId === "string" ? raw.supplierId : null,
     guestSessionId:
@@ -337,7 +362,57 @@ export async function listSessions(villaId: string | null): Promise<RealtimeSess
 
 // ── Writes ──────────────────────────────────────────────────────────────────
 
-/** Persist one new request (guest app, chat prompt or Services booking). */
+/**
+ * Columns added by supabase/schema-v2-service-details.sql. The deployed app may
+ * run against a database where that migration has not been executed yet, so an
+ * insert that trips over them is retried ONCE without them (see createRequest).
+ */
+const OPTIONAL_COLUMNS = [
+  "details",
+  "agency_pct",
+  "aura_pct",
+  "agency_commission",
+  "platform_commission",
+] as const;
+
+/** A copy of the row without the v2-only columns. */
+function withoutOptionalColumns(row: Row): Row {
+  const fallback: Row = { ...row };
+  for (const column of OPTIONAL_COLUMNS) delete fallback[column];
+  return fallback;
+}
+
+/**
+ * True when PostgREST rejected the write because a column is unknown to it or
+ * because the value does not fit the column's current type:
+ *  • 42703 / PGRST204 — column does not exist (migration not run yet)
+ *  • 22P02 / PGRST102 — `details` is still the legacy TEXT column, so a jsonb
+ *    object cannot be written to it yet
+ * Anything else is a real failure and is left to the fail-soft path.
+ */
+function isSchemaMismatch(error: { code?: string | null; message?: string | null }): boolean {
+  const code = typeof error.code === "string" ? error.code : "";
+  if (code === "42703" || code === "PGRST204") return true;
+  if (code === "22P02" || code === "PGRST102") return true;
+  const message = (typeof error.message === "string" ? error.message : "").toLowerCase();
+  if (message.includes("invalid input syntax")) return true;
+  return (
+    message.includes("column") &&
+    (message.includes("does not exist") ||
+      message.includes("could not find") ||
+      message.includes("schema cache"))
+  );
+}
+
+/**
+ * Persist one new request (guest app, chat prompt or Services booking).
+ *
+ * Resilience: the optional v2 columns (details jsonb + the two commission
+ * amounts) may not exist yet on a database where the migration has not been
+ * run. In that case the insert is retried once WITHOUT them, so the request —
+ * including its price — is still recorded and nothing breaks pre-migration.
+ * Any other failure leaves the optimistic local state in charge (fail-soft).
+ */
 export async function createRequest(request: RealtimeRequest): Promise<void> {
   const client = getClient();
   if (!client) {
@@ -346,7 +421,16 @@ export async function createRequest(request: RealtimeRequest): Promise<void> {
     return;
   }
   try {
-    await client.from("guest_requests").upsert(toRow(request), { onConflict: "id" });
+    const row = toRow(request);
+    const { error } = await client
+      .from("guest_requests")
+      .upsert(row, { onConflict: "id" });
+    if (!error) return;
+    if (!isSchemaMismatch(error)) return;
+    // Pre-migration database: record the request without the optional columns.
+    await client.from("guest_requests").upsert(withoutOptionalColumns(row), {
+      onConflict: "id",
+    });
   } catch {
     /* offline — the optimistic local state still shows the request */
   }
