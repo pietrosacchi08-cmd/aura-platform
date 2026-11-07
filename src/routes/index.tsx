@@ -8,6 +8,8 @@ import {
   conciergeImages,
   conciergeServices,
   guestAccess,
+  recordedAgencyCommission,
+  recordedPlatformCommission,
   revenueConfig,
   splitRequestAmounts,
   staffAccess,
@@ -15,6 +17,14 @@ import {
   toCsv,
   type ConciergeService,
 } from "../data/config";
+import {
+  formatEuroIt,
+  formatServiceDetails,
+  matchServiceCategory,
+  parseServiceDetails,
+  type ServiceDetails,
+} from "../data/serviceDetails";
+import { ServiceDetailsPanel, ServiceRequestModal } from "../components/service-modals";
 import {
   archiveRequestsForVilla,
   closeSessionsForVilla,
@@ -97,7 +107,8 @@ interface GuestRequest {
   guestName: string;
   villaName: string;
   serviceType: string;
-  details: string;
+  /** Structured guest choices from the Services modals (jsonb column `details`). */
+  details: ServiceDetails | null;
   status: GuestRequestStatus;
   /** Recorded price, or null while no price has been set. */
   price: number | null;
@@ -105,6 +116,10 @@ interface GuestRequest {
   agencyPct: number;
   /** AURA share of the price, in percent (default from revenueConfig). */
   auraPct: number;
+  /** Agency commission recorded with the request (null on pre-migration rows). */
+  agencyCommission: number | null;
+  /** AURA platform commission recorded with the request (null pre-migration). */
+  platformCommission: number | null;
   /** Free-text note written by the staff for this request. */
   staffNote: string;
   /** Assigned supplier (Suppliers screen) or null while none is assigned. */
@@ -187,11 +202,22 @@ function normalizeGuestRequest(raw: unknown): GuestRequest | null {
       typeof row.guestName === "string" && row.guestName ? row.guestName : "Guest",
     villaName,
     serviceType,
-    details: typeof row.details === "string" ? row.details : "",
+    // Legacy rows stored a plain text note here; anything that is not a shape
+    // this app wrote parses to null and simply renders no details panel.
+    details: parseServiceDetails(row.details),
     status,
     price,
     agencyPct: num(row.agencyPct, revenueConfig.agencyCommissionPct),
     auraPct: num(row.auraPct, revenueConfig.auraFeePct),
+    agencyCommission:
+      typeof row.agencyCommission === "number" && Number.isFinite(row.agencyCommission)
+        ? row.agencyCommission
+        : null,
+    platformCommission:
+      typeof row.platformCommission === "number" &&
+      Number.isFinite(row.platformCommission)
+        ? row.platformCommission
+        : null,
     staffNote: typeof row.staffNote === "string" ? row.staffNote : "",
     supplierId,
     guestSessionId,
@@ -232,10 +258,24 @@ function mergeGuestRequests(
   return [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-/** Agency commission for one request (0 when no price has been recorded). */
-function agencyCommissionFor(request: GuestRequest): number | null {
-  if (request.price === null) return null;
-  return (request.price * revenueConfig.agencyCommissionPct) / 100;
+/**
+ * The two commission amounts to show on a staff row: the RECORDED columns when
+ * the row carries them, otherwise derived from the price (rows created before
+ * the commission columns existed). Never both stored and re-derived.
+ */
+function recordedCommissions(request: GuestRequest): {
+  agency: number | null;
+  platform: number | null;
+} {
+  return {
+    agency: request.agencyCommission ?? recordedAgencyCommission(request.price),
+    platform: request.platformCommission ?? recordedPlatformCommission(request.price),
+  };
+}
+
+/** "€ 540,00", or an em dash when the amount is unknown. */
+function formatEuroOrDash(amount: number | null): string {
+  return amount === null ? "—" : formatEuroIt(amount);
 }
 
 function normalizeSupplier(raw: unknown): Supplier | null {
@@ -661,7 +701,11 @@ function Home() {
   }, []);
 
   const handleCreateRequest = useCallback(
-    (serviceType: string, guestName = "Guest", details = "") => {
+    (
+      serviceType: string,
+      details: ServiceDetails | null = null,
+      price: number | null = null,
+    ) => {
       const now = new Date().toISOString();
       // Every request is stamped with the villa it was raised for, and — while a
       // guest stay is active — with that stay's session id so the guest's
@@ -670,14 +714,20 @@ function Home() {
         activePropertyId === ALL_VILLAS ? null : activePropertyId;
       const request: GuestRequest = {
         id: `gr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        guestName: guestSession?.guestName || guestName,
+        guestName: guestSession?.guestName || "Guest",
         villaName: properties.find((p) => p.id === villaId)?.name ?? "—",
         serviceType,
         details,
         status: "received",
-        price: null,
+        // The Services modals record their live estimate; every other flow
+        // still records no price and leaves the amount to the staff.
+        price,
         agencyPct: revenueConfig.agencyCommissionPct,
         auraPct: revenueConfig.auraFeePct,
+        // The two commissions are RECORDED alongside the price so the revenue
+        // split of the moment survives a later config change.
+        agencyCommission: recordedAgencyCommission(price),
+        platformCommission: recordedPlatformCommission(price),
         staffNote: "",
         supplierId: null,
         guestSessionId: guestSession?.sessionId ?? null,
@@ -1466,7 +1516,11 @@ function TabPanels({
   revenueTransactions: RevenueTransaction[];
   guestRequests: GuestRequest[];
   requestsStorageError: boolean;
-  onCreateRequest: (serviceType: string) => void;
+  onCreateRequest: (
+    serviceType: string,
+    details?: ServiceDetails | null,
+    price?: number | null,
+  ) => void;
   onUpdateRequest: (id: string, patch: Partial<GuestRequest>) => void;
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   onRetryRequests: () => void;
@@ -3128,6 +3182,9 @@ function StaffRequestRow({
   onUpdateRequestStatus: (id: string, status: GuestRequestStatus) => void;
   suppliers: Supplier[];
 }) {
+  // Recorded commissions when the row carries them, derived from the price
+  // otherwise (rows created before the commission columns existed).
+  const commissions = recordedCommissions(request);
   return (
     <div
       className="overflow-hidden rounded-xl border border-border"
@@ -3159,7 +3216,14 @@ function StaffRequestRow({
             <span>
               Commissione agenzia ({revenueConfig.agencyCommissionPct}%):{" "}
               <span className="tracking-wide" style={{ color: "var(--aura-accent, #D4AF37)" }}>
-                {formatRequestAmount(agencyCommissionFor(request))}
+                {formatEuroOrDash(commissions.agency)}
+              </span>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              Platform AURA ({revenueConfig.platformCommissionPct}%):{" "}
+              <span className="tracking-wide" style={{ color: "var(--aura-accent, #D4AF37)" }}>
+                {formatEuroOrDash(commissions.platform)}
               </span>
             </span>
           </p>
@@ -3253,11 +3317,8 @@ function StaffRequestEditor({
 
   return (
     <div className="space-y-4">
-      {request.details && (
-        <p className="text-[11px] font-light text-text-secondary">
-          {request.details}
-        </p>
-      )}
+      {/* "Dettagli richiesta" — the guest's choices, labelled in Italian */}
+      <ServiceDetailsPanel rows={formatServiceDetails(request.details)} />
       {/* Status — this is what the guest timeline follows */}
       <div>
         <p className={requestLabelClass}>Status</p>
@@ -3810,9 +3871,16 @@ function ServicesPanel({
 }: {
   onAddTask: (task: TaskItem) => void;
   activeProperty: Property;
-  onCreateRequest: (serviceType: string) => void;
+  onCreateRequest: (
+    serviceType: string,
+    details?: ServiceDetails | null,
+    price?: number | null,
+  ) => void;
 }) {
   const [bookingService, setBookingService] = useState<ConciergeService | null>(null);
+  // A card opens its category's interactive modal (live estimate + summary);
+  // a service outside the four categories keeps the generic request modal.
+  const modalCategory = bookingService ? matchServiceCategory(bookingService) : null;
 
   return (
     <div className="rounded-2xl border border-border bg-charcoal p-8 md:p-10 lg:p-12">
@@ -3845,8 +3913,26 @@ function ServicesPanel({
         ))}
       </div>
 
-      {/* Request Modal */}
-      {bookingService && (
+      {/* Request modal — interactive form per service category */}
+      {bookingService && modalCategory ? (
+        <ServiceRequestModal
+          service={bookingService}
+          propertyName={activeProperty.name}
+          onClose={() => setBookingService(null)}
+          onSubmit={(payload) => {
+            onAddTask({
+              id: generateTaskId(),
+              module: "Concierge",
+              description: `[CONCIERGE] ${payload.serviceType} — ${payload.summary} — ${formatEuroIt(payload.price)} (stima) — Richiesta inviata, in attesa di conferma`,
+              status: "pending",
+              createdAt: new Date().toLocaleTimeString(),
+            });
+            // Records the live estimate as the request price, the guest's
+            // choices as jsonb details, and both commissions alongside.
+            onCreateRequest(payload.serviceType, payload.details, payload.price);
+          }}
+        />
+      ) : bookingService ? (
         <BookingModal
           service={bookingService}
           activeProperty={activeProperty}
@@ -3854,7 +3940,7 @@ function ServicesPanel({
           onAddTask={onAddTask}
           onCreateRequest={onCreateRequest}
         />
-      )}
+      ) : null}
     </div>
   );
 }
@@ -4124,6 +4210,26 @@ function ServiceIcon({ type }: { type: ConciergeService["icon"] }) {
         >
           <path d="M4 26l10-5-2-6 8-2 4 8 6-2-3-9 3-4-4-1-5 5-9-3-2 6 8 3-4 5z" />
           <path d="M2 28h28" opacity="0.3" />
+        </svg>
+      );
+
+    case "wellness":
+      return (
+        <svg
+          width="32"
+          height="32"
+          viewBox="0 0 32 32"
+          fill="none"
+          stroke={accent}
+          strokeWidth="1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M16 6c2.5 2.5 4 5.5 4 8.5S18.5 20 16 22c-2.5-2-4-4.5-4-7.5S13.5 8.5 16 6z" />
+          <path d="M16 22v5" />
+          <path d="M8 27c2-2 4-3 8-3s6 1 8 3" />
+          <path d="M9 13c-2 1-3 2.5-3 4" opacity="0.5" />
+          <path d="M23 13c2 1 3 2.5 3 4" opacity="0.5" />
         </svg>
       );
   }
