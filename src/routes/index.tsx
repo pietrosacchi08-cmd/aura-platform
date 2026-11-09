@@ -3917,6 +3917,7 @@ function ServicesPanel({
       {bookingService && modalCategory ? (
         <ServiceRequestModal
           service={bookingService}
+          villaId={activeProperty.id}
           propertyName={activeProperty.name}
           onClose={() => setBookingService(null)}
           onSubmit={(payload) => {
