@@ -8,9 +8,17 @@
  *   • the `details` object that is stored as jsonb on the request.
  *
  * All rates come from `servicePricing` in src/data/config.ts — nothing here is
- * a hard-coded price.
+ * a hard-coded price. The exception is the transfer/helicopter quote: since
+ * schema v3 that price comes from the villa's own fleet
+ * (`calculate_service_quote` in src/lib/fleet.ts), and `fleetTransferDetails`
+ * below only packages that quote for storage.
  */
 import { servicePricing, round2 } from "./config";
+import {
+  FLEET_CATEGORY_LABELS,
+  type FleetCategory,
+  type FleetQuote,
+} from "../lib/fleet";
 
 // ── Stored shape (jsonb column `details`) ────────────────────────────────────
 
@@ -64,6 +72,24 @@ export interface TransferDetails {
   base: number;
   perPassenger: number;
   total: number;
+  // ── Veicolo del listino della villa (schema v3) ──────────────────────────
+  // Tutti opzionali: le richieste registrate prima della flotta restano valide
+  // e si leggono esattamente come prima.
+  /** id della riga `villa_fleet` scelta. */
+  vehicleId?: string;
+  /** Etichetta del veicolo, es. "Mercedes GLS 450". */
+  vehicleLabel?: string;
+  /** Categoria del veicolo (suv / van / sedan / supercar / helicopter). */
+  vehicleCategory?: FleetCategory;
+  /** Etichetta italiana della categoria, salvata per non doverla ricalcolare. */
+  vehicleCategoryLabel?: string;
+  /** Nome del fornitore che eroga il servizio. */
+  vehicleSupplier?: string;
+  /**
+   * Preventivo completo di `calculate_service_quote`: è la fotografia del
+   * calcolo (base, unità, supplementi, totale, riparto) al momento dell'invio.
+   */
+  vehicleQuote?: FleetQuote;
 }
 
 /** Wellness & spa / personal training. */
@@ -346,6 +372,47 @@ export function transferDetails(input: {
   };
 }
 
+/**
+ * Trasferimento/elicottero quotato dal listino DELLA VILLA (schema v3).
+ *
+ * Il totale non viene ricalcolato qui: arriva già pronto da
+ * `calculate_service_quote` (src/lib/fleet.ts), l'unica funzione che fa i conti.
+ * Questo builder si limita a impacchettare i campi del form e a fotografare il
+ * preventivo dentro `vehicleQuote`, così la richiesta registrata è verificabile.
+ */
+export function fleetTransferDetails(input: {
+  from: string;
+  to: string;
+  time: string;
+  passengers: number;
+  luggage: number;
+  quote: FleetQuote;
+}): TransferDetails {
+  const quote = input.quote;
+  const mode: TransferMode =
+    quote.category === "helicopter" ? "helicopter" : "transfer";
+  return {
+    category: "transfer",
+    mode,
+    modeLabel: TRANSFER_MODE_LABELS[mode],
+    from: input.from.trim(),
+    to: input.to.trim(),
+    time: input.time,
+    passengers: quote.pax,
+    luggage: quote.luggage,
+    // Base + percorrenza/durata: la parte "veicolo" del totale.
+    base: round2(quote.basePrice + quote.unitsAmount),
+    perPassenger: quote.extraPaxSurcharge,
+    total: quote.total,
+    vehicleId: quote.vehicleId,
+    vehicleLabel: quote.vehicleLabel,
+    vehicleCategory: quote.category,
+    vehicleCategoryLabel: FLEET_CATEGORY_LABELS[quote.category],
+    vehicleSupplier: quote.supplierName,
+    vehicleQuote: quote,
+  };
+}
+
 export function wellnessDetails(input: {
   treatmentId: string;
   date: string;
@@ -484,6 +551,28 @@ export function formatServiceDetails(details: ServiceDetails | null): DetailRow[
     case "transfer":
       return [
         { label: "Servizio", value: details.modeLabel },
+        ...(details.vehicleLabel
+          ? [
+              {
+                label: "Veicolo",
+                value: details.vehicleCategoryLabel
+                  ? `${details.vehicleLabel} · ${details.vehicleCategoryLabel}`
+                  : details.vehicleLabel,
+              },
+            ]
+          : []),
+        ...(details.vehicleSupplier
+          ? [{ label: "Fornitore", value: details.vehicleSupplier }]
+          : []),
+        ...(details.vehicleQuote && details.vehicleQuote.unit !== "fixed"
+          ? [
+              {
+                label:
+                  details.vehicleQuote.unit === "km" ? "Percorrenza" : "Durata",
+                value: `${details.vehicleQuote.units} ${details.vehicleQuote.unitLabel}`,
+              },
+            ]
+          : []),
         { label: "Partenza", value: orDash(details.from) },
         { label: "Destinazione", value: orDash(details.to) },
         { label: "Orario", value: orDash(details.time) },
@@ -524,7 +613,7 @@ export function serviceDetailsSummary(details: ServiceDetails | null): string {
         .join(" · ");
     case "transfer":
       return [
-        details.modeLabel,
+        details.vehicleLabel ?? details.modeLabel,
         [details.from, details.to].filter(Boolean).join(" → "),
         details.time && `ore ${details.time}`,
         `${details.passengers} passeggeri`,

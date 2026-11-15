@@ -20,16 +20,14 @@ import { servicePricing } from "../data/config";
 import {
   CHEF_MEAL_LABELS,
   ESTIMATE_DISCLAIMER,
-  TRANSFER_MODE_LABELS,
   YACHT_DURATION_LABELS,
   chefDetails,
   chefQuote,
   clampInt,
+  fleetTransferDetails,
   formatEuroIt,
   matchServiceCategory,
   serviceDetailsSummary,
-  transferDetails,
-  transferQuote,
   wellnessDetails,
   wellnessQuote,
   yachtDetails,
@@ -40,6 +38,14 @@ import {
   type TransferMode,
   type YachtDuration,
 } from "../data/serviceDetails";
+import {
+  FLEET_UNIT_LABELS,
+  calculate_service_quote,
+  get_available_services,
+  getAvailableServicesSync,
+  type FleetCatalog,
+  type FleetCategoryGroup,
+} from "../lib/fleet";
 
 // ── Contract with the Services tab ──────────────────────────────────────────
 
@@ -65,6 +71,8 @@ export interface ServiceSubmitPayload {
 
 export interface ServiceModalProps {
   service: ModalService;
+  /** Active villa id — seleziona la flotta della villa (`villa_fleet`). */
+  villaId: string;
   /** Active villa name — prefilled as the transfer pickup point. */
   propertyName: string;
   onClose: () => void;
@@ -517,61 +525,185 @@ function ChefForm({
   );
 }
 
-// ── 3. Luxury transfer / helicopter ─────────────────────────────────────────
+// ── 3. Luxury transfer / helicopter — flotta della villa (schema v3) ────────
+//
+// Niente prezzi scritti qui: le categorie e i veicoli arrivano da
+// get_available_services(villaId) (DB-first, fallback al listino standard) e il
+// totale nasce solo da calculate_service_quote. Se una villa non ha una
+// categoria (es. nessuna supercar) quella categoria semplicemente non esiste.
+
+/** Le categorie che questo modal mostra, per l'ingresso scelto. */
+function transferGroups(
+  catalog: FleetCatalog,
+  initialMode: TransferMode,
+): FleetCategoryGroup[] {
+  return catalog.categories.filter((group) =>
+    initialMode === "helicopter"
+      ? group.category === "helicopter"
+      : group.category !== "helicopter",
+  );
+}
 
 function TransferForm({
+  villaId,
   initialMode,
   propertyName,
   onSubmit,
   onCancel,
 }: {
+  villaId: string;
   initialMode: TransferMode;
   propertyName: string;
   onSubmit: (details: ServiceDetails) => void;
   onCancel: () => void;
 }) {
-  const [mode, setMode] = useState<TransferMode>(initialMode);
+  // Primo render immediato col catalogo in cache (o col fallback), poi il DB.
+  const [catalog, setCatalog] = useState<FleetCatalog>(() =>
+    getAvailableServicesSync(villaId),
+  );
+  useEffect(() => {
+    let alive = true;
+    void get_available_services(villaId).then((next) => {
+      if (alive) setCatalog(next);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [villaId]);
+
+  const groups = transferGroups(catalog, initialMode);
+  const [categoryId, setCategoryId] = useState("");
+  const [vehicleId, setVehicleId] = useState("");
+  // La selezione è derivata: se il catalogo cambia (DB al posto del fallback)
+  // una scelta non più valida ricade sulla prima categoria/veicolo disponibile.
+  const group = groups.find((g) => g.category === categoryId) ?? groups[0];
+  const vehicle = group?.vehicles.find((v) => v.id === vehicleId) ?? group?.vehicles[0];
+
   const [from, setFrom] = useState(propertyName);
   const [to, setTo] = useState("");
   const [time, setTime] = useState("10:00");
   const [passengers, setPassengers] = useState(
-    initialMode === "helicopter"
-      ? servicePricing.helicopter.defaultPassengers
-      : servicePricing.transfer.defaultPassengers,
+    servicePricing.transfer.defaultPassengers,
   );
   const [luggage, setLuggage] = useState(2);
-  const card =
-    mode === "helicopter" ? servicePricing.helicopter : servicePricing.transfer;
-  const quote = transferQuote({ mode, passengers });
-  const maxPassengers = card.maxPassengers;
+  const [km, setKm] = useState(20);
+  const [hours, setHours] = useState(1);
 
-  // Switching mode resets the passenger count into the new card's range.
-  const changeMode = (next: TransferMode) => {
-    setMode(next);
-    const nextCard =
-      next === "helicopter" ? servicePricing.helicopter : servicePricing.transfer;
-    setPassengers((prev) => clampInt(prev, 1, nextCard.maxPassengers));
-  };
+  const pax = clampInt(passengers, 1, vehicle?.maxPax ?? 1);
+  const quote = vehicle
+    ? calculate_service_quote(vehicle, { pax, luggage, km, hours })
+    : null;
+
+  if (!vehicle || !quote) {
+    return (
+      <div className="space-y-5">
+        <p className="text-sm font-light leading-relaxed text-text-secondary">
+          {initialMode === "helicopter"
+            ? "Questa villa non ha un servizio elicottero attivo nel listino."
+            : "Questa villa non ha veicoli con autista attivi nel listino."}{" "}
+          Le altre categorie del Concierge restano disponibili.
+        </p>
+        <button type="button" onClick={onCancel} className={ghostButtonClass}>
+          Chiudi
+        </button>
+      </div>
+    );
+  }
+
+  const maxLuggage =
+    initialMode === "helicopter"
+      ? servicePricing.helicopter.maxLuggage
+      : servicePricing.transfer.maxLuggage;
+  const unitLabel = FLEET_UNIT_LABELS[vehicle.unit];
 
   return (
     <div className="space-y-5">
-      <Field label="Servizio">
-        <div className="mt-1.5 flex gap-2">
-          {(["transfer", "helicopter"] as TransferMode[]).map((option) => (
+      <Field label="Categoria">
+        <div className="mt-1.5 grid gap-2 sm:grid-cols-3">
+          {groups.map((option) => (
             <ChoicePill
-              key={option}
-              active={mode === option}
-              onClick={() => changeMode(option)}
-              label={TRANSFER_MODE_LABELS[option]}
-              note={formatEuroIt(
-                option === "helicopter"
-                  ? servicePricing.helicopter.base
-                  : servicePricing.transfer.base,
-              )}
+              key={option.category}
+              active={option.category === group.category}
+              onClick={() => {
+                setCategoryId(option.category);
+                setVehicleId("");
+              }}
+              label={option.label}
+              note={`${option.vehicles.length} ${
+                option.vehicles.length === 1 ? "veicolo" : "veicoli"
+              }`}
             />
           ))}
         </div>
       </Field>
+
+      <Field label="Veicolo">
+        <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
+          {group.vehicles.map((option) => {
+            const active = option.id === vehicle.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => setVehicleId(option.id)}
+                aria-pressed={active}
+                className={`cursor-pointer rounded-lg border px-3 py-2.5 text-left transition-all duration-200 ${
+                  active
+                    ? "border-[var(--aura-accent,#D4AF37)]"
+                    : "border-border hover:border-[var(--aura-accent,#D4AF37)]"
+                }`}
+                style={{
+                  backgroundColor: active
+                    ? "rgba(212,175,55,0.10)"
+                    : "rgba(11,11,11,0.6)",
+                }}
+              >
+                <span
+                  className={`block text-xs font-medium tracking-wide ${
+                    active
+                      ? "text-[var(--aura-accent,#D4AF37)]"
+                      : "text-text-primary"
+                  }`}
+                >
+                  {option.label}
+                </span>
+                <span className="mt-0.5 block text-[10px] font-light text-text-muted">
+                  {formatEuroIt(option.basePrice)}
+                  {option.unit !== "fixed" &&
+                    ` + ${formatEuroIt(option.unitPrice)}/${FLEET_UNIT_LABELS[option.unit]}`}
+                  {` · max ${option.maxPax} pax`}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[10px] font-light text-text-muted/70">
+          Listino {vehicle.supplierName}
+        </p>
+      </Field>
+
+      {vehicle.unit !== "fixed" && (
+        <Field
+          label={vehicle.unit === "km" ? "Distanza stimata (km)" : "Durata stimata (ore)"}
+          htmlFor="transfer-units"
+        >
+          <input
+            id="transfer-units"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={vehicle.unit === "km" ? 2000 : 24}
+            value={vehicle.unit === "km" ? km : hours}
+            onChange={(e) => {
+              const next = Math.max(0, Math.round(Number(e.target.value) || 0));
+              if (vehicle.unit === "km") setKm(next);
+              else setHours(next);
+            }}
+            className={inputClass}
+            style={inputStyle}
+          />
+        </Field>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Punto di partenza" htmlFor="transfer-from">
@@ -612,9 +744,9 @@ function TransferForm({
         <Field label="Numero passeggeri" htmlFor="transfer-passengers">
           <Stepper
             id="transfer-passengers"
-            value={passengers}
+            value={pax}
             min={1}
-            max={maxPassengers}
+            max={vehicle.maxPax}
             onChange={setPassengers}
           />
         </Field>
@@ -625,17 +757,27 @@ function TransferForm({
           id="transfer-luggage"
           value={luggage}
           min={0}
-          max={card.maxLuggage}
+          max={maxLuggage}
           onChange={setLuggage}
         />
       </Field>
 
-      <CostSummary quote={quote} footnote="il numero di bagagli non incide sulla stima" />
+      <CostSummary
+        quote={quote}
+        footnote={`tariffa ${unitLabel} · ${vehicle.supplierName}`}
+      />
       <ModalActions
         onCancel={onCancel}
         onSubmit={() =>
           onSubmit(
-            transferDetails({ mode, from, to, time, passengers, luggage }),
+            fleetTransferDetails({
+              from,
+              to,
+              time,
+              passengers: pax,
+              luggage,
+              quote,
+            }),
           )
         }
       />
@@ -736,6 +878,7 @@ function WellnessForm({
  */
 export function ServiceRequestModal({
   service,
+  villaId,
   propertyName,
   onClose,
   onSubmit,
@@ -813,6 +956,7 @@ export function ServiceRequestModal({
     if (match.category === "transfer") {
       return (
         <TransferForm
+          villaId={villaId}
           initialMode={match.transferMode ?? "transfer"}
           propertyName={propertyName}
           onSubmit={handleSubmit}
