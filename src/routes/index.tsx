@@ -18,6 +18,7 @@ import {
   type ConciergeService,
 } from "../data/config";
 import {
+  ESTIMATE_DISCLAIMER,
   formatEuroIt,
   formatServiceDetails,
   matchServiceCategory,
@@ -38,6 +39,18 @@ import {
   updateRequest,
 } from "../lib/realtime";
 import { playStaffChime } from "../lib/chime";
+import {
+  buildChatBookingPayload,
+  parseBookingIntent,
+  planBookingReply,
+  type ChatBookingCard,
+} from "../lib/chatAgent";
+import {
+  FLEET_CATEGORY_LABELS,
+  get_available_services,
+  getAvailableServicesSync,
+  type FleetCatalog,
+} from "../lib/fleet";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -91,6 +104,8 @@ interface ChatMessage {
   role: "system" | "user" | "ai";
   content: string;
   tasks?: TaskItem[];
+  /** Booking card dell'agente deterministico: totale da calculate_service_quote. */
+  bookingCard?: ChatBookingCard;
 }
 // ── Guest Requests ───────────────────────────────────────────────────────────
 type GuestRequestStatus =
@@ -1557,6 +1572,7 @@ function TabPanels({
                   tasks={tasks}
                   setTasks={setTasks}
                   onCreateRequest={onCreateRequest}
+                  villaId={activeProperty.id}
                 />
               ) : tab.id === "services" ? (
                 <ServicesPanel
@@ -2315,10 +2331,18 @@ function ConciergePanel({
   tasks,
   setTasks,
   onCreateRequest,
+  villaId,
 }: {
   tasks: TaskItem[];
   setTasks: React.Dispatch<React.SetStateAction<TaskItem[]>>;
-  onCreateRequest: (serviceType: string) => void;
+  /** Stesso pipeline dei modal: serviceType + details jsonb + prezzo stimato. */
+  onCreateRequest: (
+    serviceType: string,
+    details?: ServiceDetails | null,
+    price?: number | null,
+  ) => void;
+  /** Villa attiva: la chat legge SOLO l'inventario di questa villa. */
+  villaId: string;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
@@ -2338,6 +2362,22 @@ function ConciergePanel({
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const conversationTopicsRef = useRef<string[]>([]);
   const sendingRef = useRef(false);
+
+  // Inventario reale della villa: subito il listino sincrono (fallback prima
+  // dello SQL v3), poi il catalogo DB-first quando risponde.
+  const [catalog, setCatalog] = useState<FleetCatalog>(() =>
+    getAvailableServicesSync(villaId),
+  );
+  useEffect(() => {
+    let alive = true;
+    setCatalog(getAvailableServicesSync(villaId));
+    void get_available_services(villaId).then((next) => {
+      if (alive) setCatalog(next);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [villaId]);
 
     // Persist chat messages to localStorage
   useEffect(() => {
@@ -2417,11 +2457,56 @@ function ConciergePanel({
 
       const suggestionResponses: Record<string, string> = {
         "request a private chef": "With pleasure, Sir. Your private chef request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.",
-        "request a transfer": "Certainly, Sir. Your transfer request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.",
         "request a boat": "Of course, Sir. Your boat request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.",
       };
+      // "Request a transfer" non è più un testo fisso: scende nell'agente
+      // deterministico, che propone i veicoli REALI della villa.
 
       const normalized = trimmed.toLowerCase().replace(/[.?!,]+$/, "").trim();
+
+      // ── Agente deterministico ────────────────────────────────────────────
+      // Nessun LLM: solo l'inventario della villa e il preventivo del tool.
+      // Categoria assente → "non disponibile" + alternative; parametri
+      // mancanti → chiede solo ciò che manca; altrimenti booking card.
+      const agentPlan = planBookingReply(
+        parseBookingIntent(trimmed, catalog),
+        catalog,
+      );
+      if (agentPlan.kind !== "none") {
+        const agentUserMsg: ChatMessage = {
+          id: `user-${Date.now()}`,
+          role: "user",
+          content: trimmed,
+        };
+        setMessages((prev) => [...prev, agentUserMsg]);
+        setInputValue("");
+        conversationTopicsRef.current = [...conversationTopicsRef.current, trimmed].slice(-3);
+        setProcessingPhase("processing");
+
+        const agentTimer = setTimeout(() => {
+          const aiMsgId = `ai-${Date.now()}`;
+          const aiMsg: ChatMessage = {
+            id: aiMsgId,
+            role: "ai",
+            content: agentPlan.content,
+            // La cifra vive SOLO nella card, e arriva da calculate_service_quote.
+            bookingCard:
+              agentPlan.kind === "booking"
+                ? { quote: agentPlan.quote, trip: agentPlan.trip, status: "pending" }
+                : undefined,
+          };
+          setMessages((prev) => [...prev, aiMsg]);
+          typewriterContentRef.current = "";
+          setTypewriterChars(0);
+          setIsTypewriting(false);
+          setLatestAiMsgId(aiMsgId);
+          setProcessingPhase("idle");
+          sendingRef.current = false;
+        }, 500);
+        timersRef.current.push(agentTimer);
+        return;
+      }
+
       if (suggestionResponses[normalized]) {
         // Show the user's message immediately (same as normal flow)
         const userMsg: ChatMessage = {
@@ -2521,8 +2606,54 @@ function ConciergePanel({
 
       timersRef.current.push(t1);
     },
-    [processingPhase, registerRequestFromIntents],
+    [catalog, processingPhase, registerRequestFromIntents],
   );
+
+  // Conferma della card: STESSO pipeline dei modal (onCreateRequest →
+  // realtime.ts toRow + OPTIONAL_COLUMNS retry), con details.channel = "chat".
+  // Nessuna logica di scrittura nuova: staff realtime e "I Miei Servizi"
+  // funzionano già.
+  const handleConfirmBooking = useCallback(
+    (messageId: string) => {
+      const card = messages.find((m) => m.id === messageId)?.bookingCard;
+      if (!card || card.status !== "pending") return;
+      const payload = buildChatBookingPayload(card.quote, card.trip);
+      onCreateRequest(payload.serviceLabel, payload.details, payload.price);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId && m.bookingCard
+            ? { ...m, bookingCard: { ...m.bookingCard, status: "confirmed" } }
+            : m,
+        ),
+      );
+      const confirmation: ChatMessage = {
+        id: `ai-${Date.now()}`,
+        role: "ai",
+        content: `Perfetto, Sir. La richiesta per ${card.quote.vehicleLabel} è stata inviata al nostro staff: la troverà in "I Miei Servizi", con lo stato aggiornato in tempo reale.`,
+      };
+      setMessages((prev) => [...prev, confirmation]);
+      setLatestAiMsgId(confirmation.id);
+    },
+    [messages, onCreateRequest],
+  );
+
+  const handleCancelBooking = useCallback((messageId: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId && m.bookingCard
+          ? { ...m, bookingCard: { ...m.bookingCard, status: "cancelled" } }
+          : m,
+      ),
+    );
+    const reply: ChatMessage = {
+      id: `ai-${Date.now()}`,
+      role: "ai",
+      content:
+        "Come preferisce, Sir. La proposta è annullata e nessuna richiesta è stata inviata. Mi dica se desidera un'altra soluzione.",
+    };
+    setMessages((prev) => [...prev, reply]);
+    setLatestAiMsgId(reply.id);
+  }, []);
 
   const handleToggleTask = useCallback((taskId: string) => {
     setTasks((prev) =>
@@ -2580,6 +2711,8 @@ function ConciergePanel({
         latestAiMsgId={latestAiMsgId}
         isTypewriting={isTypewriting}
         typewriterChars={typewriterChars}
+        onConfirmBooking={handleConfirmBooking}
+        onCancelBooking={handleCancelBooking}
       />
     </div>
   );
@@ -2598,6 +2731,8 @@ function OwnerView({
   latestAiMsgId,
   isTypewriting = false,
   typewriterChars = 0,
+  onConfirmBooking,
+  onCancelBooking,
 }: {
   messages: ChatMessage[];
   processingPhase: ProcessingPhase;
@@ -2609,6 +2744,8 @@ function OwnerView({
   latestAiMsgId: string | null;
   isTypewriting?: boolean;
   typewriterChars?: number;
+  onConfirmBooking?: (messageId: string) => void;
+  onCancelBooking?: (messageId: string) => void;
 }) {
   const isBusy = processingPhase !== "idle";
   return (
@@ -2674,6 +2811,8 @@ function OwnerView({
                 ? typewriterChars
                 : undefined
             }
+            onConfirmBooking={onConfirmBooking}
+            onCancelBooking={onCancelBooking}
           />
         ))}
 
@@ -2798,10 +2937,14 @@ function ChatBubble({
   message,
   isNew,
   typewriterChars,
+  onConfirmBooking,
+  onCancelBooking,
 }: {
   message: ChatMessage;
   isNew?: boolean;
   typewriterChars?: number;
+  onConfirmBooking?: (messageId: string) => void;
+  onCancelBooking?: (messageId: string) => void;
 }) {
   const isSystem = message.role === "system";
   const isAi = message.role === "ai";
@@ -2835,6 +2978,15 @@ function ChatBubble({
           {isTyping && <span className="typewriter-cursor">|</span>}
         </p>
 
+        {/* Booking card — totale stimato da calculate_service_quote */}
+        {message.bookingCard && (
+          <ChatBookingCardView
+            card={message.bookingCard}
+            onConfirm={() => onConfirmBooking?.(message.id)}
+            onCancel={() => onCancelBooking?.(message.id)}
+          />
+        )}
+
         {/* Task cards inside AI message */}
         {message.tasks && message.tasks.length > 0 && (
           <div className="mt-4 space-y-2">
@@ -2865,6 +3017,129 @@ function ChatBubble({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Booking Card (chat) ─────────────────────────────────────────────────────
+/**
+ * La card della chat: veicolo + fornitore, dettagli della corsa, righe del
+ * preventivo e TOTALE STIMATO. Ogni cifra arriva da `calculate_service_quote`
+ * (src/lib/fleet.ts) — qui non si fa alcun conto.
+ */
+function ChatBookingCardView({
+  card,
+  onConfirm,
+  onCancel,
+}: {
+  card: ChatBookingCard;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { quote, trip } = card;
+  const pending = card.status === "pending";
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "Passeggeri", value: String(quote.pax) },
+    { label: "Bagagli", value: String(quote.luggage) },
+  ];
+  if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
+  if (trip.time) rows.push({ label: "Orario", value: trip.time });
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl border border-[var(--aura-border-accent,rgba(212,175,55,0.35))] bg-[rgba(255,255,255,0.02)]">
+      <div className="border-b border-border px-4 py-3">
+        <p
+          className="text-[10px] font-semibold uppercase tracking-[0.18em]"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          Proposta di prenotazione
+        </p>
+        <p className="mt-1.5 text-sm font-light text-text-primary">{quote.vehicleLabel}</p>
+        <p className="mt-0.5 text-[11px] font-light text-text-muted">
+          {quote.supplierName} · {FLEET_CATEGORY_LABELS[quote.category]}
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2 px-4 py-3">
+        {rows.map((row) => (
+          <div key={row.label} className="min-w-0">
+            <p className="text-[9px] uppercase tracking-[0.14em] text-text-muted">
+              {row.label}
+            </p>
+            <p className="text-xs font-light text-text-primary">{row.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-1.5 border-t border-border px-4 py-3">
+        {quote.lines.map((line) => (
+          <div
+            key={`${line.label}-${line.amount}`}
+            className="flex items-baseline justify-between gap-3"
+          >
+            <span className="text-[11px] font-light text-text-secondary">
+              {line.label}
+              {line.detail && <span className="text-text-muted"> · {line.detail}</span>}
+            </span>
+            <span className="text-[11px] font-light tabular-nums text-text-primary">
+              {formatEuroIt(line.amount)}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-baseline justify-between gap-3 border-t border-border px-4 py-3">
+        <span
+          className="text-[10px] font-semibold uppercase tracking-[0.16em]"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          Totale stimato
+        </span>
+        <span
+          className="text-lg font-light tabular-nums"
+          style={{ color: "var(--aura-accent, #D4AF37)" }}
+        >
+          {formatEuroIt(quote.total)}
+        </span>
+      </div>
+      <p className="px-4 pb-3 text-[10px] font-light italic text-text-muted">
+        {ESTIMATE_DISCLAIMER}
+      </p>
+
+      {pending ? (
+        <div className="flex flex-col gap-2 px-4 pb-4 sm:flex-row">
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="flex-1 rounded-lg px-4 py-2.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-midnight transition-opacity duration-300 hover:opacity-90"
+            style={{ backgroundColor: "var(--aura-accent, #D4AF37)" }}
+          >
+            Conferma e Invia Richiesta
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-lg border border-border px-4 py-2.5 text-[10px] font-light uppercase tracking-[0.14em] text-text-secondary transition-colors duration-300 hover:text-text-primary"
+          >
+            Annulla
+          </button>
+        </div>
+      ) : (
+        <div className="px-4 pb-4">
+          <span
+            className={`text-[10px] font-light uppercase tracking-[0.12em] ${card.status === "confirmed" ? "" : "text-text-muted"}`}
+            style={
+              card.status === "confirmed"
+                ? { color: "var(--aura-accent, #D4AF37)" }
+                : undefined
+            }
+          >
+            {card.status === "confirmed"
+              ? "✓ Richiesta inviata allo staff"
+              : "Proposta annullata — nessuna richiesta inviata"}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
