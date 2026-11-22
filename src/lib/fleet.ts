@@ -19,6 +19,7 @@
  *   3. Le percentuali di riparto vivono in `revenueConfig` (config.ts), non qui.
  *
  * Schema di riferimento: supabase/schema-v3-villa-fleet.sql
+ *                        supabase/schema-v4-vehicle-capacity.sql
  */
 import { revenueConfig, round2, servicePricing } from "../data/config";
 
@@ -43,11 +44,21 @@ export interface FleetVehicle {
   basePrice: number;
   unitPrice: number;
   unit: FleetUnit;
-  /** Supplemento per bagaglio oltre i 2 inclusi. */
+  /** Supplemento per bagaglio oltre `includedBags`. */
   luggageSurcharge: number;
-  /** Supplemento per passeggero oltre i 2 inclusi. */
+  /** Supplemento per passeggero oltre `includedPax`. */
   extraPaxSurcharge: number;
   maxPax: number;
+  /**
+   * Passeggeri inclusi nel prezzo base (colonna `included_pax`, SQL v4).
+   * Assente quando il DB non ha ancora le colonne: vale FLEET_INCLUDED_PAX.
+   */
+  includedPax?: number;
+  /**
+   * Bagagli inclusi nel prezzo base (colonna `included_bags`, SQL v4).
+   * Assente quando il DB non ha ancora le colonne: vale FLEET_INCLUDED_LUGGAGE.
+   */
+  includedBags?: number;
   active: boolean;
 }
 
@@ -105,6 +116,9 @@ export interface FleetQuote {
   /** Tariffe unitarie del veicolo, fotografate nel preventivo. */
   luggageSurcharge: number;
   extraPaxSurcharge: number;
+  /** Soglie reali del veicolo: sotto questi valori non scatta supplemento. */
+  includedPax: number;
+  includedBags: number;
   unitsAmount: number;
   luggageAmount: number;
   extraPaxAmount: number;
@@ -118,9 +132,15 @@ export interface FleetQuote {
 
 // ── Costanti di dominio ─────────────────────────────────────────────────────
 
-/** Passeggeri inclusi nel prezzo base: oltre, scatta extraPaxSurcharge. */
+/**
+ * Passeggeri inclusi nel prezzo base quando il veicolo non li dichiara
+ * (listino di fallback o DB senza SQL v4): oltre, scatta extraPaxSurcharge.
+ */
 export const FLEET_INCLUDED_PAX = 2;
-/** Bagagli inclusi nel prezzo base: oltre, scatta luggageSurcharge. */
+/**
+ * Bagagli inclusi nel prezzo base quando il veicolo non li dichiara: oltre,
+ * scatta luggageSurcharge.
+ */
 export const FLEET_INCLUDED_LUGGAGE = 2;
 
 /** Ordine di presentazione delle categorie nel modal. */
@@ -160,6 +180,31 @@ const safeNumber = (value: unknown): number => {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : 0;
 };
+
+/** Intero opzionale: undefined quando la colonna non c'è (SQL v4 assente). */
+const optionalInt = (value: unknown): number | undefined => {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0
+    ? Math.round(n)
+    : undefined;
+};
+
+/** Intero non negativo, altrimenti il default storico. */
+function includedOrDefault(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : fallback;
+}
+
+/** Passeggeri inclusi nel prezzo base del veicolo (default FLEET_INCLUDED_PAX). */
+export function vehicleIncludedPax(vehicle: FleetVehicle): number {
+  return includedOrDefault(vehicle.includedPax, FLEET_INCLUDED_PAX);
+}
+
+/** Bagagli inclusi nel prezzo base del veicolo (default FLEET_INCLUDED_LUGGAGE). */
+export function vehicleIncludedBags(vehicle: FleetVehicle): number {
+  return includedOrDefault(vehicle.includedBags, FLEET_INCLUDED_LUGGAGE);
+}
 
 const clampInt = (value: number, min: number, max: number): number => {
   if (!Number.isFinite(value)) return min;
@@ -298,8 +343,40 @@ function toVehicle(row: Row, fallbackVillaId: string): FleetVehicle | null {
     luggageSurcharge: safeNumber(row.luggage_surcharge),
     extraPaxSurcharge: safeNumber(row.extra_pax_surcharge),
     maxPax: Math.max(1, clampInt(safeNumber(row.max_pax) || 4, 1, 16)),
+    includedPax: optionalInt(row.included_pax),
+    includedBags: optionalInt(row.included_bags),
     active: row.active !== false,
   };
+}
+
+/** Colonne di `villa_fleet` lette dal client (schema v3). */
+const FLEET_COLUMNS_V3 = [
+  "id",
+  "villa_id",
+  "supplier_id",
+  "category",
+  "label",
+  "base_price",
+  "unit_price",
+  "unit",
+  "luggage_surcharge",
+  "extra_pax_surcharge",
+  "max_pax",
+  "active",
+];
+
+/** Colonne aggiunte dallo SQL v4 (capienza reale per veicolo). */
+const FLEET_COLUMNS_V4 = ["included_pax", "included_bags"];
+
+/** URL REST della flotta di una villa, con la join sul fornitore. */
+function fleetUrl(baseUrl: string, villaId: string, columns: string[]): string {
+  const query = [
+    `select=${[...columns, "suppliers(name)"].join(",")}`,
+    `villa_id=eq.${encodeURIComponent(villaId)}`,
+    "active=eq.true",
+    "order=category.asc,base_price.asc",
+  ].join("&");
+  return `${baseUrl}/rest/v1/villa_fleet?${query}`;
 }
 
 /**
@@ -311,33 +388,41 @@ async function fetchFleetFromDb(villaId: string): Promise<FleetVehicle[] | null>
   const { url: baseUrl, key: anonKey } = supabaseConfig();
   if (!baseUrl || !anonKey || !villaId) return null;
 
-  const query = [
-    "select=id,villa_id,supplier_id,category,label,base_price,unit_price,unit,luggage_surcharge,extra_pax_surcharge,max_pax,active,suppliers(name)",
-    `villa_id=eq.${encodeURIComponent(villaId)}`,
-    "active=eq.true",
-    "order=category.asc,base_price.asc",
-  ].join("&");
-  const url = `${baseUrl}/rest/v1/villa_fleet?${query}`;
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
-      headers: {
-        apikey: anonKey,
-        Authorization: `Bearer ${anonKey}`,
-        Accept: "application/json",
-      },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
+    // Prima con le colonne della capienza (SQL v4). Se il DB non le ha ancora,
+    // PostgREST risponde 400 su una colonna inesistente: si riprova senza,
+    // così la flotta della villa resta quella del DB (niente fallback) e le
+    // soglie tornano ai default 2 / 2.
+    let rows: unknown = null;
+    let status = 0;
+    for (const columns of [
+      [...FLEET_COLUMNS_V3, ...FLEET_COLUMNS_V4],
+      FLEET_COLUMNS_V3,
+    ]) {
+      const response = await fetch(fleetUrl(baseUrl, villaId, columns), {
+        headers: {
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        status = response.status;
+        continue;
+      }
+      rows = (await response.json()) as unknown;
+      break;
+    }
+    if (rows === null) {
       // 404 = tabella non ancora creata (SQL v3 non eseguito): caso atteso.
       console.info(
-        `[AURA fleet] villa_fleet non disponibile per ${villaId} (HTTP ${response.status}) — uso il listino di fallback`,
+        `[AURA fleet] villa_fleet non disponibile per ${villaId} (HTTP ${status}) — uso il listino di fallback`,
       );
       return null;
     }
-    const rows = (await response.json()) as unknown;
     if (!Array.isArray(rows)) return null;
     const vehicles = rows
       .filter((row): row is Row => typeof row === "object" && row !== null)
@@ -445,8 +530,11 @@ function billableUnits(vehicle: FleetVehicle, params: FleetQuoteParams): number 
  *
  *   totale = base_price
  *          + unit_price × unità
- *          + luggage_surcharge   × max(0, bagagli    − 2)
- *          + extra_pax_surcharge × max(0, passeggeri − 2)
+ *          + luggage_surcharge   × max(0, bagagli    − included_bags)
+ *          + extra_pax_surcharge × max(0, passeggeri − included_pax)
+ *
+ * `included_pax` / `included_bags` sono la capienza reale del veicolo (SQL v4);
+ * se mancano valgono 2 / 2, il comportamento storico.
  *
  * Il riparto usa le percentuali di `revenueConfig` (agenzia 12%, AURA 3%) e la
  * quota fornitore è il resto, così le tre parti sommano sempre al totale.
@@ -467,14 +555,16 @@ export function calculate_service_quote(
   const luggage = clampInt(params.luggage ?? 0, 0, 99);
   const units = billableUnits(vehicle, params);
 
+  // Soglie reali del veicolo: sotto questi valori nessun supplemento.
+  const includedPax = vehicleIncludedPax(vehicle);
+  const includedBags = vehicleIncludedBags(vehicle);
+  const extraPaxCount = Math.max(0, pax - includedPax);
+  const extraBagCount = Math.max(0, luggage - includedBags);
+
   const basePrice = round2(vehicle.basePrice);
   const unitsAmount = round2(vehicle.unitPrice * units);
-  const luggageAmount = round2(
-    vehicle.luggageSurcharge * Math.max(0, luggage - FLEET_INCLUDED_LUGGAGE),
-  );
-  const extraPaxAmount = round2(
-    vehicle.extraPaxSurcharge * Math.max(0, pax - FLEET_INCLUDED_PAX),
-  );
+  const luggageAmount = round2(vehicle.luggageSurcharge * extraBagCount);
+  const extraPaxAmount = round2(vehicle.extraPaxSurcharge * extraPaxCount);
   const total = round2(basePrice + unitsAmount + luggageAmount + extraPaxAmount);
 
   const agencyCommission = round2(
@@ -505,14 +595,14 @@ export function calculate_service_quote(
   if (luggageAmount > 0) {
     lines.push({
       label: "Supplemento bagagli",
-      detail: `${luggage - FLEET_INCLUDED_LUGGAGE} oltre i ${FLEET_INCLUDED_LUGGAGE} inclusi`,
+      detail: `${extraBagCount} oltre i ${includedBags} inclusi`,
       amount: luggageAmount,
     });
   }
   if (extraPaxAmount > 0) {
     lines.push({
       label: "Supplemento passeggeri",
-      detail: `${pax - FLEET_INCLUDED_PAX} oltre i ${FLEET_INCLUDED_PAX} inclusi`,
+      detail: `${extraPaxCount} oltre i ${includedPax} inclusi`,
       amount: extraPaxAmount,
     });
   }
@@ -531,6 +621,8 @@ export function calculate_service_quote(
     basePrice,
     luggageSurcharge: round2(vehicle.luggageSurcharge),
     extraPaxSurcharge: round2(vehicle.extraPaxSurcharge),
+    includedPax,
+    includedBags,
     unitsAmount,
     luggageAmount,
     extraPaxAmount,
