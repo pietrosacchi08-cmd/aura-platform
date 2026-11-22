@@ -1497,9 +1497,6 @@ function TabPanels({
   activeVillaId,
   activeTab,
   activeProperty,
-  properties,
-  activePropertyId,
-  onSwitchProperty,
   tasks,
   setTasks,
   onAddTask,
@@ -1619,8 +1616,8 @@ function TabPanels({
               ) : (
                 <PlaceholderPanel
                   icon={tab.icon}
-                  title={tabContent[tab.id].title}
-                  subtitle={tabContent[tab.id].subtitle}
+                  title={tabContent[tab.id as Tab].title}
+                  subtitle={tabContent[tab.id as Tab].subtitle}
                 />
               )}
             </div>
@@ -1696,12 +1693,6 @@ interface DetectedIntent {
   specifics: string;
 }
 
-interface AIResponse {
-  content: string;
-  tasks: TaskItem[];
-  intents: DetectedIntent[];
-}
-
 // Service intents that become a tracked guest request.
 const REQUEST_INTENT_TITLES: Partial<Record<IntentType, string>> = {
   concierge: "Private Chef & Dining",
@@ -1715,7 +1706,7 @@ const REQUEST_INTENT_TITLES: Partial<Record<IntentType, string>> = {
 };
 // ── Intent Signal Keywords ────────────────────────────────────────────────────
 
-const intentKeywords: Record<Exclude<IntentType, "general">, string[]> = {
+const intentKeywords: Record<Exclude<IntentType, "general" | "closing">, string[]> = {
   concierge: [
     "champagne", "wine", "drinks", "drink", "cocktail", "bar", "bottle",
     "dinner", "lunch", "breakfast", "brunch", "restaurant", "reservation",
@@ -1839,49 +1830,49 @@ function analyzeIntents(message: string): DetectedIntent[] {
 // agency staff do. Every reply to a service request therefore ends with the
 // exact same sentence, and no reply promises execution or quotes a number.
 const arrivalVariants: Array<(s: string) => string> = [
-  (s) => `Good evening, Sir. I have your arrival noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Thank you, Sir — your arrival and guest count are noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Good evening, Sir. I have your arrival noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Thank you, Sir — your arrival and guest count are noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const conciergeVariants: Array<(s: string) => string> = [
-  (s) => `Certainly, Sir. Your dining request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `With pleasure, Sir. I have your request for our cellar selection. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Of course, Sir. Your request for the chef and the dining room is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Thank you, Sir. I have recorded your request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Certainly, Sir. Your dining request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `With pleasure, Sir. I have your request for our cellar selection. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Of course, Sir. Your request for the chef and the dining room is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Thank you, Sir. I have recorded your request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const transportYachtVariants: Array<(s: string) => string> = [
-  (s) => `Certainly, Sir. Your boat request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `With pleasure, Sir. I have your charter request noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Of course, Sir. I have noted the date you have in mind for the boat. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Certainly, Sir. Your boat request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `With pleasure, Sir. I have your charter request noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Of course, Sir. I have noted the date you have in mind for the boat. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const chauffeurVariants: Array<(s: string) => string> = [
-  (s) => `At once, Sir. Your transfer request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Certainly, Sir. I have your chauffeur request noted, together with the time you mentioned. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `At once, Sir. Your transfer request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Certainly, Sir. I have your chauffeur request noted, together with the time you mentioned. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const aviationVariants: Array<(s: string) => string> = [
-  (s) => `Of course, Sir. Your aviation request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Thank you, Sir. I have recorded your flight request and the route details. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Of course, Sir. Your aviation request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Thank you, Sir. I have recorded your flight request and the route details. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const maintenanceVariants: Array<(s: string) => string> = [
-  (s) => `Understood, Sir. Your climate and pool request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Of course, Sir. I have recorded your maintenance request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Understood, Sir. Your climate and pool request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Of course, Sir. I have recorded your maintenance request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const securityVariants: Array<(s: string) => string> = [
-  (s) => `Understood, Sir. Your security request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Certainly, Sir. I have recorded your access and security request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Understood, Sir. Your security request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Certainly, Sir. I have recorded your access and security request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const housekeepingVariants: Array<(s: string) => string> = [
-  (s) => `Certainly, Sir. Your housekeeping request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
-  (s) => `Of course, Sir. I have recorded your housekeeping request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Certainly, Sir. Your housekeeping request is noted. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
+  (_s) => `Of course, Sir. I have recorded your housekeeping request. I've sent your request to our staff. You'll see the status here once it's confirmed.`,
 ];
 const generalShortVariants: Array<(s: string) => string> = [
-  (s) => `Sir, I would be delighted to assist. Could you share a little more detail — the service you have in mind, the date, and the number of guests?`,
-  (s) => `I am at your service, Sir. Tell me a little more about what you need so it reaches the right staff.`,
-  (s) => `At your disposal, Sir. I can take requests for dining, transfers, boats, aviation and the house — what would you like to request today?`,
+  (_s) => `Sir, I would be delighted to assist. Could you share a little more detail — the service you have in mind, the date, and the number of guests?`,
+  (_s) => `I am at your service, Sir. Tell me a little more about what you need so it reaches the right staff.`,
+  (_s) => `At your disposal, Sir. I can take requests for dining, transfers, boats, aviation and the house — what would you like to request today?`,
 ];
 const generalLongVariants: Array<(s: string) => string> = [
-  (s) => `Thank you, Sir. I have noted your message. Which service shall I pass to our staff — dining, transfers, boats, aviation or housekeeping?`,
-  (s) => `Understood, Sir. If you tell me the service and the details, I can pass the request to our staff. Is there anything else you would like to add?`,
-  (s) => `Of course, Sir. I have noted this. What would you like me to pass to our staff?`,
+  (_s) => `Thank you, Sir. I have noted your message. Which service shall I pass to our staff — dining, transfers, boats, aviation or housekeeping?`,
+  (_s) => `Understood, Sir. If you tell me the service and the details, I can pass the request to our staff. Is there anything else you would like to add?`,
+  (_s) => `Of course, Sir. I have noted this. What would you like me to pass to our staff?`,
 ];
 
 const variantCounters: Record<string, number> = {};
@@ -2328,7 +2319,6 @@ type ProcessingPhase = "idle" | "processing" | "typing";
 // ── StaffPanel ─────────────────────────────────────────────────────────────────
 
 function ConciergePanel({
-  tasks,
   setTasks,
   onCreateRequest,
   villaId,
@@ -2384,8 +2374,6 @@ function ConciergePanel({
     try { localStorage.setItem("aura-messages", JSON.stringify(messages)); }
     catch { /* storage full */ }
   }, [messages]);
-
-  const completedCount = tasks.filter((t) => t.status === "confirmed" || t.status === "completed").length;
 
   // Cleanup timers on unmount
   useEffect(() => {
@@ -2653,34 +2641,6 @@ function ConciergePanel({
     };
     setMessages((prev) => [...prev, reply]);
     setLatestAiMsgId(reply.id);
-  }, []);
-
-  const handleToggleTask = useCallback((taskId: string) => {
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id !== taskId) return t;
-        const statusCycle: Record<string, TaskItem["status"]> = {
-          pending: "in_progress",
-          in_progress: "confirmed",
-          confirmed: "completed",
-          completed: "pending",
-        };
-        const nextStatus = statusCycle[t.status] || "pending";
-        return {
-          ...t,
-          status: nextStatus,
-          completedAt: nextStatus === "completed" ? new Date().toLocaleTimeString() : t.completedAt,
-        };
-      }),
-    );
-  }, []);
-
-  const handleAssignTask = useCallback((taskId: string, name: string) => {
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.id === taskId ? { ...t, assignedTo: name || undefined } : t,
-      ),
-    );
   }, []);
 
   return (
@@ -3038,9 +2998,11 @@ function ChatBookingCardView({
 }) {
   const { quote, trip } = card;
   const pending = card.status === "pending";
+  // Le soglie sono quelle reali del veicolo (SQL v4): il supplemento compare
+  // nelle righe del preventivo solo quando viene superato.
   const rows: Array<{ label: string; value: string }> = [
-    { label: "Passeggeri", value: String(quote.pax) },
-    { label: "Bagagli", value: String(quote.luggage) },
+    { label: "Passeggeri", value: `${quote.pax} · inclusi ${quote.includedPax}` },
+    { label: "Bagagli", value: `${quote.luggage} · inclusi ${quote.includedBags}` },
   ];
   if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
   if (trip.time) rows.push({ label: "Orario", value: trip.time });
@@ -3786,7 +3748,6 @@ function StaffRequestEditor({
 
 function StaffView({
   tasks,
-  completedCount,
   totalCount,
   onToggleTask,
   onAssignTask,
@@ -3932,7 +3893,6 @@ function TaskCard({
   const isCompleted = task.status === "completed";
   const isConfirmed = task.status === "confirmed";
   const isDone = isCompleted || isConfirmed;
-  const isPending = task.status === "pending";
 
   // Extract guest count and room info from description
   const guestMatch = task.description.match(/(\d+)\s*guests?/i);
@@ -4693,23 +4653,6 @@ interface RevenueStat {
 
 function formatCurrency(value: number): string {
   return `€${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function formatRelativeTime(timestamp: number): string {
-  const diffMs = Date.now() - timestamp;
-  const diffSec = Math.floor(diffMs / 1000);
-  const diffMin = Math.floor(diffSec / 60);
-  const diffHr = Math.floor(diffMin / 60);
-
-  if (diffSec < 10) return "Just now";
-  if (diffSec < 60) return `${diffSec} seconds ago`;
-  if (diffMin < 1) return "Just now";
-  if (diffMin === 1) return "1 minute ago";
-  if (diffMin < 60) return `${diffMin} minutes ago`;
-  if (diffHr === 1) return "1 hour ago";
-  if (diffHr < 24) return `${diffHr} hours ago`;
-  const d = new Date(timestamp);
-  return `Today at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 function RevenuePanel({

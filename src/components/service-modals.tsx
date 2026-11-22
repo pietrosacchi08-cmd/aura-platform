@@ -43,6 +43,8 @@ import {
   calculate_service_quote,
   get_available_services,
   getAvailableServicesSync,
+  vehicleIncludedBags,
+  vehicleIncludedPax,
   type FleetCatalog,
   type FleetCategoryGroup,
 } from "../lib/fleet";
@@ -672,6 +674,7 @@ function TransferForm({
                   {option.unit !== "fixed" &&
                     ` + ${formatEuroIt(option.unitPrice)}/${FLEET_UNIT_LABELS[option.unit]}`}
                   {` · max ${option.maxPax} pax`}
+                  {` · inclusi ${vehicleIncludedPax(option)} pax / ${vehicleIncludedBags(option)} bagagli`}
                 </span>
               </button>
             );
@@ -764,7 +767,7 @@ function TransferForm({
 
       <CostSummary
         quote={quote}
-        footnote={`tariffa ${unitLabel} · ${vehicle.supplierName}`}
+        footnote={`tariffa ${unitLabel} · ${vehicle.supplierName} · inclusi ${quote.includedPax} pax / ${quote.includedBags} bagagli`}
       />
       <ModalActions
         onCancel={onCancel}
