@@ -46,7 +46,6 @@ import {
   type ChatBookingCard,
 } from "../lib/chatAgent";
 import {
-  FLEET_CATEGORY_LABELS,
   get_available_services,
   getAvailableServicesSync,
   type FleetCatalog,
@@ -2617,7 +2616,7 @@ function ConciergePanel({
       const confirmation: ChatMessage = {
         id: `ai-${Date.now()}`,
         role: "ai",
-        content: `Perfetto, Sir. La richiesta per ${card.quote.vehicleLabel} è stata inviata al nostro staff: la troverà in "I Miei Servizi", con lo stato aggiornato in tempo reale.`,
+        content: `Perfetto, Sir. La richiesta per ${card.quote.title} è stata inviata al nostro staff: la troverà in "I Miei Servizi", con lo stato aggiornato in tempo reale.`,
       };
       setMessages((prev) => [...prev, confirmation]);
       setLatestAiMsgId(confirmation.id);
@@ -2983,9 +2982,11 @@ function ChatBubble({
 
 // ── Booking Card (chat) ─────────────────────────────────────────────────────
 /**
- * La card della chat: veicolo + fornitore, dettagli della corsa, righe del
- * preventivo e TOTALE STIMATO. Ogni cifra arriva da `calculate_service_quote`
- * (src/lib/fleet.ts) — qui non si fa alcun conto.
+ * La card della chat, identica per tutti i servizi: titolo, parametri reali
+ * della richiesta, righe del preventivo e TOTALE STIMATO. Ogni cifra arriva da
+ * un calcolatore reale (`calculate_service_quote` per transfer e aviation,
+ * `chefQuote` / `yachtQuote` / `wellnessQuote` per gli altri servizi) — qui non
+ * si fa alcun conto.
  */
 function ChatBookingCardView({
   card,
@@ -2996,16 +2997,8 @@ function ChatBookingCardView({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const { quote, trip } = card;
+  const { quote } = card;
   const pending = card.status === "pending";
-  // Le soglie sono quelle reali del veicolo (SQL v4): il supplemento compare
-  // nelle righe del preventivo solo quando viene superato.
-  const rows: Array<{ label: string; value: string }> = [
-    { label: "Passeggeri", value: `${quote.pax} · inclusi ${quote.includedPax}` },
-    { label: "Bagagli", value: `${quote.luggage} · inclusi ${quote.includedBags}` },
-  ];
-  if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
-  if (trip.time) rows.push({ label: "Orario", value: trip.time });
 
   return (
     <div className="mt-3 overflow-hidden rounded-xl border border-[var(--aura-border-accent,rgba(212,175,55,0.35))] bg-[rgba(255,255,255,0.02)]">
@@ -3016,14 +3009,12 @@ function ChatBookingCardView({
         >
           Proposta di prenotazione
         </p>
-        <p className="mt-1.5 text-sm font-light text-text-primary">{quote.vehicleLabel}</p>
-        <p className="mt-0.5 text-[11px] font-light text-text-muted">
-          {quote.supplierName} · {FLEET_CATEGORY_LABELS[quote.category]}
-        </p>
+        <p className="mt-1.5 text-sm font-light text-text-primary">{quote.title}</p>
+        <p className="mt-0.5 text-[11px] font-light text-text-muted">{quote.subtitle}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-2 px-4 py-3">
-        {rows.map((row) => (
+        {quote.rows.map((row) => (
           <div key={row.label} className="min-w-0">
             <p className="text-[9px] uppercase tracking-[0.14em] text-text-muted">
               {row.label}

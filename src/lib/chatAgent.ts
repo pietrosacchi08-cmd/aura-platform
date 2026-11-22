@@ -2,28 +2,57 @@
  * AURA — Concierge chat agent (deterministico, zero LLM).
  *
  * La chat del tab Concierge non inventa nulla: legge l'inventario REALE della
- * villa (`get_available_services` in src/lib/fleet.ts), interpreta la richiesta
- * con regole deterministiche (keyword italiane + numeri) e produce il prezzo
- * SOLO tramite `calculate_service_quote`.
+ * villa (`get_available_services` in src/lib/fleet.ts per i transfer,
+ * `conciergeServices` in src/data/config.ts per gli altri servizi), interpreta
+ * la richiesta con regole deterministiche (keyword italiane + numeri) e produce
+ * il prezzo SOLO tramite i calcolatori che usano i modal:
  *
- *   parseBookingIntent(text, catalog) → cosa ha chiesto l'ospite
- *   planBookingReply(intent, catalog) → cosa rispondere (nessuna card inventata)
- *   buildChatBookingPayload(quote)    → i campi esatti dell'INSERT
+ *   • transfer / aviation → `calculate_service_quote` (flotta della villa)
+ *   • chef, yacht, wellness → `chefQuote` / `yachtQuote` / `wellnessQuote`
+ *     (src/data/serviceDetails.ts, tariffe di `servicePricing`)
+ *
+ *   parseBookingIntent(text, catalog)     → cosa ha chiesto l'ospite
+ *   planBookingReply(intent, catalog)     → cosa rispondere (nessuna card inventata)
+ *   buildChatBookingPayload(quote, trip)  → i campi esatti dell'INSERT
  *
  * Tutto qui è puro e sincrono: nessuna rete, nessun DOM. Il pannello passa il
  * catalogo già caricato, così i test (scripts/test-chat-agent.ts) girano su
  * fixture senza browser.
  *
  * Regole:
- *   1. Una categoria assente dal catalogo della villa non si prenota: si dice
- *      che non è disponibile e si elencano le alternative reali.
- *   2. Nessun totale compare in testo libero: le cifre vivono nella bookingCard
- *      e vengono da `calculate_service_quote`.
- *   3. Il payload della conferma ha la stessa forma dei modal (TransferDetails
- *      via `fleetTransferDetails`), più `channel: "chat"`.
+ *   1. Un servizio che la villa non offre non si prenota: si dice che non è
+ *      disponibile e si elencano le alternative reali.
+ *   2. Nessun parametro mancante viene sostituito da un default: l'agente
+ *      chiede SOLO i parametri che mancano e non mostra nessuna card.
+ *   3. Nessun totale compare in testo libero: le cifre vivono nella bookingCard
+ *      e vengono dai calcolatori reali.
+ *   4. Ogni frase con un nome di servizio/categoria passa da `withArticle`
+ *      (src/lib/grammar.ts): mai "La Elicottero".
+ *   5. Il payload della conferma ha la stessa forma dei modal (ServiceDetails
+ *      via i builder di serviceDetails.ts), più `channel: "chat"`.
  */
-import { revenueConfig, round2 } from "../data/config";
-import { fleetTransferDetails, type TransferDetails } from "../data/serviceDetails";
+import {
+  conciergeServices,
+  revenueConfig,
+  round2,
+  servicePricing,
+  type ConciergeService,
+} from "../data/config";
+import {
+  CHEF_MEAL_LABELS,
+  chefDetails,
+  chefQuote,
+  fleetTransferDetails,
+  matchServiceCategory,
+  wellnessDetails,
+  wellnessQuote,
+  yachtDetails,
+  yachtQuote,
+  type ChefMeal,
+  type QuoteLine,
+  type ServiceDetails,
+  type YachtDuration,
+} from "../data/serviceDetails";
 import {
   FLEET_CATEGORY_LABELS,
   calculate_service_quote,
@@ -32,10 +61,19 @@ import {
   type FleetQuote,
   type FleetVehicle,
 } from "./fleet";
+import { joinItalian, withArticle } from "./grammar";
 
 // ── Tipi pubblici ───────────────────────────────────────────────────────────
 
-/** Quando il trasferimento è richiesto: campi vuoti = non specificato. */
+/** I servizi che l'agente sa prenotare: tutta la villa. */
+export type ChatServiceKind =
+  | "transfer"
+  | "aviation"
+  | "chef"
+  | "yacht"
+  | "wellness";
+
+/** Quando il servizio è richiesto: campi vuoti = non specificato. */
 export interface BookingTrip {
   /** YYYY-MM-DD, oppure "" se l'ospite non ha indicato una data. */
   date: string;
@@ -45,11 +83,23 @@ export interface BookingTrip {
   time: string;
 }
 
+/** Tratta dichiarata per l'aviazione privata. */
+export interface BookingRoute {
+  /** Località di partenza ("" se non indicata). */
+  from: string;
+  /** Località di arrivo ("" se non indicata). */
+  to: string;
+  /** Distanza dichiarata in km, quando l'ospite la cita. */
+  km: number | null;
+}
+
 /** Ciò che l'ospite ha chiesto, letto dall'inventario della villa. */
 export interface BookingIntent {
   raw: string;
-  /** true quando il messaggio riguarda un servizio a catalogo (flotta). */
+  /** true quando il messaggio riguarda un servizio a catalogo. */
   isBooking: boolean;
+  /** Il servizio richiesto; null quando il messaggio non chiede un servizio. */
+  service: ChatServiceKind | null;
   /** Veicolo riconosciuto per etichetta; null se non ne ha nominato uno. */
   vehicle: FleetVehicle | null;
   /** Categoria nominata (anche se la villa non la possiede). */
@@ -58,35 +108,93 @@ export interface BookingIntent {
   pax: number | null;
   luggage: number | null;
   trip: BookingTrip;
+  // ── Parametri per servizio (null = l'ospite non li ha indicati) ──────────
+  /** Pasto richiesto (chef). */
+  meal: ChefMeal | null;
+  /** Ospiti dichiarati (chef). */
+  guests: number | null;
+  /** Preferenze alimentari, pass-through facoltativo (chef). */
+  dietary: string;
+  /** Durata del charter (yacht). */
+  duration: YachtDuration | null;
+  /** Skipper richiesto (yacht) — opzione, non parametro essenziale. */
+  skipper: boolean;
+  /** Carburante incluso (yacht) — opzione, non parametro essenziale. */
+  fuel: boolean;
+  /** Trattamento scelto (wellness). */
+  treatmentId: string | null;
+  /** Tratta dichiarata (aviation). */
+  route: BookingRoute;
 }
 
 /** Cosa manca per poter generare una card. */
-export type BookingMissing = "vehicle" | "pax";
+export type BookingMissing =
+  | "vehicle"
+  | "pax"
+  | "meal"
+  | "guests"
+  | "duration"
+  | "treatment"
+  | "route"
+  | "date"
+  | "time";
+
+/** Una riga chiave/valore della card (parametri reali della richiesta). */
+export interface ChatQuoteRow {
+  label: string;
+  value: string;
+}
+
+/**
+ * Il preventivo della chat, normalizzato su tutti i servizi.
+ * `lines` e `total` arrivano SEMPRE da un calcolatore reale (flotta o
+ * servicePricing): qui non si fa alcun conto.
+ */
+export interface ChatQuote {
+  service: ChatServiceKind;
+  /** Valore della colonna `service_label`. */
+  serviceLabel: string;
+  /** Titolo della card. */
+  title: string;
+  /** Riga secondaria della card (fornitore / provenienza del servizio). */
+  subtitle: string;
+  /** Parametri della richiesta, come li leggerà lo staff. */
+  rows: ChatQuoteRow[];
+  /** Righe del preventivo, dal calcolatore del modal. */
+  lines: QuoteLine[];
+  total: number;
+  /** Frase con cui l'agente presenta la proposta (nessun prezzo: è nella card). */
+  summary: string;
+  /** Dettagli per il JSONB `details`, stessa forma dei modal. */
+  details: ServiceDetails;
+  /** Passeggeri, quando il servizio ne ha (mirror di `details.passengers`). */
+  pax?: number;
+}
 
 /** Esito deterministico della chat: una sola risposta possibile per input. */
 export type BookingPlan =
   | { kind: "none" }
   | { kind: "unavailable"; content: string; alternatives: string[] }
   | { kind: "clarify"; content: string; missing: BookingMissing[] }
-  | { kind: "booking"; content: string; quote: FleetQuote; trip: BookingTrip };
+  | { kind: "booking"; content: string; quote: ChatQuote; trip: BookingTrip };
 
 /** La bookingCard mostrata in chat: totale e righe vengono dal preventivo. */
 export interface ChatBookingCard {
-  quote: FleetQuote;
+  quote: ChatQuote;
   trip: BookingTrip;
   status: "pending" | "confirmed" | "cancelled";
 }
 
 /** I campi esatti che finiscono nella richiesta (stessa forma dei modal). */
-export interface ChatBookingDetails extends TransferDetails {
+export type ChatBookingDetails = ServiceDetails & {
   channel: "chat";
-  /** Passeggeri (mirror di `passengers`, come da contratto della chat). */
-  pax: number;
   /** Data richiesta, YYYY-MM-DD ("" se non indicata). */
   date: string;
   /** Etichetta umana della data ("domani", "12/07/2026"). */
   dateLabel: string;
-}
+  /** Passeggeri (mirror di `passengers`, solo transfer / aviation). */
+  pax?: number;
+};
 
 /** Tutto ciò che serve all'INSERT, già calcolato e verificabile. */
 export interface ChatBookingPayload {
@@ -153,18 +261,55 @@ const BOOKING_VERBS = [
   "want", "like to",
 ];
 
+/** Parole che nominano un servizio di villa (non-flotta). */
+const SERVICE_KEYWORDS: Array<[Exclude<ChatServiceKind, "transfer">, string[]]> = [
+  [
+    "aviation",
+    [
+      "elicottero", "helicopter", "helo", "aviation", "aviazione", "volo",
+      "flight", "jet privato", "private jet", "aereo privato", "jet",
+    ],
+  ],
+  ["chef", ["chef", "cuoco", "cuoca", "catering", "private chef"]],
+  [
+    "yacht",
+    [
+      "yacht", "barca", "boat", "charter", "gommone", "vela", "motoscafo",
+      "gita in barca", "boat charter", "superyacht",
+    ],
+  ],
+  [
+    "wellness",
+    [
+      "wellness", "spa", "massaggio", "massaggi", "trattamento",
+      "personal trainer", "fitness", "yoga", "sauna", "hammam", "bagno turco",
+    ],
+  ],
+];
+
 /** true se una delle parole compare come parola intera nel testo normalizzato. */
 function hasWord(text: string, word: string): boolean {
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
   return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i").test(text);
 }
 
-/** La prima categoria nominata, in ordine di presentazione della flotta. */
+const hasAnyWord = (text: string, words: string[]): boolean =>
+  words.some((word) => hasWord(text, word));
+
+/** La prima categoria della flotta nominata, in ordine di presentazione. */
 function detectCategory(text: string): FleetCategory | null {
   for (const category of Object.keys(CATEGORY_KEYWORDS) as FleetCategory[]) {
-    if (CATEGORY_KEYWORDS[category].some((keyword) => hasWord(text, keyword))) {
-      return category;
-    }
+    if (hasAnyWord(text, CATEGORY_KEYWORDS[category])) return category;
+  }
+  return null;
+}
+
+/** Il servizio di villa nominato (aviation, chef, yacht, wellness). */
+function detectVillaService(
+  text: string,
+): Exclude<ChatServiceKind, "transfer"> | null {
+  for (const [service, keywords] of SERVICE_KEYWORDS) {
+    if (hasAnyWord(text, keywords)) return service;
   }
   return null;
 }
@@ -214,7 +359,7 @@ export function matchVehicleByLabel(
   return best?.vehicle ?? null;
 }
 
-// ── Numeri: passeggeri, bagagli ─────────────────────────────────────────────
+// ── Numeri: passeggeri, bagagli, ospiti ─────────────────────────────────────
 
 const PAX_PATTERNS = [
   /(\d{1,2})\s*(?:persone|persona|pax|passeggeri|passeggero|ospiti|ospite|adulti|passengers|people|guests)\b/i,
@@ -231,16 +376,21 @@ const LUGGAGE_PATTERNS = [
 const clampCount = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, Math.round(value)));
 
-/** Passeggeri dichiarati (null se non citati). */
-function detectPax(text: string): number | null {
-  for (const pattern of PAX_PATTERNS) {
+/** Numero dichiarato con una delle formule note (null se non citato). */
+function detectCount(text: string, patterns: RegExp[], max: number): number | null {
+  for (const pattern of patterns) {
     const match = pattern.exec(text);
     if (match) {
       const value = Number(match[1]);
-      if (Number.isFinite(value) && value >= 1) return clampCount(value, 1, 16);
+      if (Number.isFinite(value) && value >= 1) return clampCount(value, 1, max);
     }
   }
   return null;
+}
+
+/** Passeggeri dichiarati (null se non citati). */
+function detectPax(text: string): number | null {
+  return detectCount(text, PAX_PATTERNS, 24);
 }
 
 /** Bagagli dichiarati (null se non citati). */
@@ -376,6 +526,97 @@ function detectDate(text: string, now: Date): BookingTrip {
   return { date: "", dateLabel: "", time: "" };
 }
 
+// ── Parametri per servizio ──────────────────────────────────────────────────
+
+/** Pasto richiesto allo chef. */
+function detectMeal(text: string): ChefMeal | null {
+  if (hasAnyWord(text, ["colazione", "breakfast", "brunch"])) return "breakfast";
+  if (hasAnyWord(text, ["pranzo", "lunch"])) return "lunch";
+  if (hasAnyWord(text, ["cena", "cenare", "dinner"])) return "dinner";
+  return null;
+}
+
+/** Preferenze alimentari citate (facoltative, pass-through allo staff). */
+const DIETARY_PATTERNS = [
+  /\b(?:vegetarian[oaie]?|vegan[oaie]?|vegano|celiac[oa]|senza glutine|gluten[- ]free)\b/i,
+  /\b(?:allergi[ac]|intolleran[tz][a-z]*)\s+(?:a|al|ai|alle|agli)?\s*[a-z]{3,20}/i,
+];
+
+function detectDietary(raw: string): string {
+  for (const pattern of DIETARY_PATTERNS) {
+    const match = pattern.exec(raw);
+    if (match) return match[0].trim();
+  }
+  return "";
+}
+
+/** Durata del charter in barca. */
+function detectDuration(text: string): YachtDuration | null {
+  if (
+    hasAnyWord(text, [
+      "mezza giornata", "mezza-giornata", "half day", "half-day", "mezzo giorno",
+    ])
+  ) {
+    return "half-day";
+  }
+  if (
+    hasAnyWord(text, [
+      "giornata intera", "intera giornata", "tutto il giorno", "full day",
+      "full-day", "giornata", "tutto il giorno",
+    ])
+  ) {
+    return "full-day";
+  }
+  return null;
+}
+
+/** Parole chiave dei trattamenti wellness (oltre alle etichette di servicePricing). */
+const TREATMENT_KEYWORDS: Record<string, string[]> = {
+  "massage-relax": ["massaggio relax", "rilassante", "relax", "decontratturante"],
+  "massage-sport": ["massaggio sportivo", "sportivo", "sport"],
+  facial: ["trattamento viso", "viso", "facciale", "facial"],
+  "personal-trainer": ["personal trainer", "trainer", "allenamento", "fitness"],
+};
+
+/** Trattamento wellness scelto (id di servicePricing.wellness.treatments). */
+function detectTreatment(text: string): string | null {
+  for (const treatment of servicePricing.wellness.treatments) {
+    if (text.includes(normalize(treatment.label))) return treatment.id;
+  }
+  for (const [id, keywords] of Object.entries(TREATMENT_KEYWORDS)) {
+    if (hasAnyWord(text, keywords)) return id;
+  }
+  return null;
+}
+
+/** Tratta "da X a Y", "X → Y" oppure una distanza in km. */
+function detectRoute(raw: string): BookingRoute {
+  const km = /\b(\d{1,4})\s*(?:km|chilometri|kilometers?|kilometres?)\b/i.exec(raw);
+  const kmValue = km ? Number(km[1]) : null;
+
+  const place = "([A-Za-zÀ-ÿ'’][A-Za-zÀ-ÿ'’ ]{1,29}?)";
+  const stop = "(?=$|[,.!?;]|\\s+(?:domani|oggi|dopodomani|alle|ore|per|con|il|in|e)\\b)";
+  const patterns = [
+    new RegExp(`\\bda\\s+${place}\\s+a\\s+${place}${stop}`, "i"),
+    new RegExp(`\\bfrom\\s+${place}\\s+to\\s+${place}${stop}`, "i"),
+    new RegExp(`${place}\\s*(?:→|->|–)\\s*${place}${stop}`, "i"),
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(raw);
+    if (!match) continue;
+    const from = titleCase(match[1]);
+    const to = titleCase(match[2]);
+    if (from && to) return { from, to, km: kmValue };
+  }
+  return { from: "", to: "", km: kmValue };
+}
+
+const titleCase = (value: string): string => {
+  const cleaned = value.trim().replace(/\s+/g, " ");
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+};
+
 // ── Intent ──────────────────────────────────────────────────────────────────
 
 /**
@@ -388,16 +629,21 @@ export function parseBookingIntent(
   now: Date = new Date(),
 ): BookingIntent {
   const normalized = normalize(text);
+  const villaService = detectVillaService(normalized);
   const category = detectCategory(normalized);
   const vehicle = matchVehicleByLabel(normalized, catalog.vehicles);
-  const hasTransferWord = TRANSFER_WORDS.some((word) => hasWord(normalized, word));
-  const hasBookingVerb = BOOKING_VERBS.some((word) => hasWord(normalized, word));
+  const hasTransferWord = hasAnyWord(normalized, TRANSFER_WORDS);
+  const hasBookingVerb = hasAnyWord(normalized, BOOKING_VERBS);
   const time = extractTime(normalized);
 
-  const isBooking =
-    category !== null ||
-    vehicle !== null ||
-    (hasTransferWord && (hasBookingVerb || time.time !== ""));
+  // Priorità: servizio nominato → categoria flotta → veicolo → parole di
+  // trasferimento. L'elicottero è sempre aviazione privata.
+  let service: ChatServiceKind | null = villaService;
+  if (!service) {
+    const fleetCategory = category ?? vehicle?.category ?? null;
+    if (fleetCategory) service = fleetCategory === "helicopter" ? "aviation" : "transfer";
+    else if (hasTransferWord && (hasBookingVerb || time.time !== "")) service = "transfer";
+  }
 
   const date = detectDate(normalized, now);
   const trip: BookingTrip = {
@@ -408,13 +654,22 @@ export function parseBookingIntent(
 
   return {
     raw: text,
-    isBooking,
+    isBooking: service !== null,
+    service,
     vehicle,
     requestedCategory: category,
     requestedCategoryLabel: category ? FLEET_CATEGORY_LABELS[category] : null,
     pax: detectPax(time.rest),
     luggage: detectLuggage(time.rest),
     trip,
+    meal: detectMeal(normalized),
+    guests: detectCount(time.rest, PAX_PATTERNS, 24),
+    dietary: detectDietary(text),
+    duration: detectDuration(normalized),
+    skipper: hasAnyWord(normalized, ["skipper", "equipaggio", "crew"]),
+    fuel: hasAnyWord(normalized, ["carburante", "benzina", "fuel"]),
+    treatmentId: detectTreatment(normalized),
+    route: detectRoute(text),
   };
 }
 
@@ -442,53 +697,320 @@ const cheapestIn = (vehicles: FleetVehicle[]): FleetVehicle =>
     vehicle.basePrice < cheapest.basePrice ? vehicle : cheapest,
   );
 
+/** Come si chiede ogni parametro mancante: solo la domanda, nessun default. */
+const MISSING_QUESTIONS: Record<BookingMissing, string> = {
+  vehicle: `${withArticle("veicolo")} preferito`,
+  pax: "il numero di passeggeri",
+  meal: "il pasto (colazione, pranzo o cena)",
+  guests: "il numero di ospiti",
+  duration: "la durata (mezza giornata o giornata intera)",
+  treatment: "il trattamento desiderato",
+  route: "la tratta (da dove a dove, oppure i km)",
+  date: "il giorno",
+  time: "l'orario",
+};
+
+/**
+ * La frase con cui si chiedono i parametri mancanti: breve, elegante e con la
+ * sola domanda utile. `context` aggiunge un'informazione reale (es. le opzioni
+ * disponibili in villa).
+ */
+function askMissing(missing: BookingMissing[], context = ""): string {
+  const questions = missing.map((key) => MISSING_QUESTIONS[key]);
+  const body =
+    questions.length === 1
+      ? `Mi serve ${questions[0]}.`
+      : `Per completare la proposta mi servono ${joinItalian(questions)}.`;
+  return [context.trim(), body].filter(Boolean).join(" ");
+}
+
+/** " — domani alle 10:00" / " — domani" / " alle 10:00" / "". */
+function tripPhrase(trip: BookingTrip): string {
+  if (trip.dateLabel && trip.time) return ` — ${trip.dateLabel} alle ${trip.time}`;
+  if (trip.dateLabel) return ` — ${trip.dateLabel}`;
+  if (trip.time) return ` alle ${trip.time}`;
+  return "";
+}
+
+const BOOKING_CTA =
+  "Il totale stimato è nella card qui sotto — confermi e invio la richiesta al nostro staff?";
+
+// ── Preventivi per servizio (stessi calcolatori dei modal) ──────────────────
+
+/** Chef: preventivo di `chefQuote`, dettagli di `chefDetails`. */
+function chefChatQuote(intent: BookingIntent, trip: BookingTrip): ChatQuote | null {
+  const meal = intent.meal;
+  const guests = intent.guests;
+  if (!meal || guests === null) return null;
+  const details = chefDetails({ meal, guests, dietary: intent.dietary });
+  const quote = chefQuote({ meal, guests });
+  const mealLabel = CHEF_MEAL_LABELS[meal];
+  const rows: ChatQuoteRow[] = [
+    { label: "Pasto", value: mealLabel },
+    { label: "Ospiti", value: String(details.guests) },
+  ];
+  if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
+  if (trip.time) rows.push({ label: "Orario", value: trip.time });
+  if (details.dietary) rows.push({ label: "Preferenze", value: details.dietary });
+
+  return {
+    service: "chef",
+    serviceLabel: `Private Chef — ${mealLabel}`,
+    title: `${mealLabel} · ${details.guests} ${details.guests === 1 ? "ospite" : "ospiti"}`,
+    subtitle: `${withArticle("servizio chef di villa", { sentenceStart: true })}`,
+    rows,
+    lines: quote.lines,
+    total: quote.total,
+    summary: `Ecco la proposta: ${withArticle("servizio chef di villa")} per ${mealLabel.toLowerCase()} di ${details.guests} ${
+      details.guests === 1 ? "ospite" : "ospiti"
+    }${tripPhrase(trip)}. ${BOOKING_CTA}`,
+    details,
+  };
+}
+
+/** Yacht: preventivo di `yachtQuote`, dettagli di `yachtDetails`. */
+function yachtChatQuote(intent: BookingIntent, trip: BookingTrip): ChatQuote | null {
+  const duration = intent.duration;
+  if (!duration) return null;
+  const details = yachtDetails({
+    duration,
+    departureTime: trip.time,
+    skipper: intent.skipper,
+    fuel: intent.fuel,
+  });
+  const quote = yachtQuote({ duration, skipper: intent.skipper, fuel: intent.fuel });
+  const rows: ChatQuoteRow[] = [{ label: "Durata", value: details.durationLabel }];
+  if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
+  if (trip.time) rows.push({ label: "Partenza", value: trip.time });
+  rows.push({ label: "Skipper", value: details.skipper ? "Incluso" : "Non incluso" });
+  rows.push({ label: "Carburante", value: details.fuel ? "Incluso" : "Non incluso" });
+
+  return {
+    service: "yacht",
+    serviceLabel: `Yacht & Boat Charter — ${details.durationLabel}`,
+    title: details.durationLabel,
+    subtitle: withArticle("charter in barca", { sentenceStart: true }),
+    rows,
+    lines: quote.lines,
+    total: quote.total,
+    summary: `Ecco la proposta: ${withArticle("charter in barca")} di ${details.durationLabel}${
+      details.skipper ? " con skipper" : ""
+    }${details.fuel ? " e carburante incluso" : ""}${tripPhrase(trip)}. ${BOOKING_CTA}`,
+    details,
+  };
+}
+
+/** Wellness: preventivo di `wellnessQuote`, dettagli di `wellnessDetails`. */
+function wellnessChatQuote(
+  intent: BookingIntent,
+  trip: BookingTrip,
+): ChatQuote | null {
+  if (!intent.treatmentId) return null;
+  const details = wellnessDetails({
+    treatmentId: intent.treatmentId,
+    date: trip.date,
+    time: trip.time,
+  });
+  const quote = wellnessQuote(details.treatmentId);
+  const rows: ChatQuoteRow[] = [{ label: "Trattamento", value: details.treatmentLabel }];
+  if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
+  if (trip.time) rows.push({ label: "Orario", value: trip.time });
+
+  return {
+    service: "wellness",
+    serviceLabel: `Wellness & Spa — ${details.treatmentLabel}`,
+    title: details.treatmentLabel,
+    subtitle: withArticle("wellness", { sentenceStart: true }),
+    rows,
+    lines: quote.lines,
+    total: quote.total,
+    summary: `Ecco la proposta: ${details.treatmentLabel} in villa${tripPhrase(trip)}. ${BOOKING_CTA}`,
+    details,
+  };
+}
+
+/** Il preventivo del servizio di villa richiesto (null se manca un parametro). */
+function villaServiceQuote(
+  intent: BookingIntent,
+  trip: BookingTrip,
+): ChatQuote | null {
+  switch (intent.service) {
+    case "chef":
+      return chefChatQuote(intent, trip);
+    case "yacht":
+      return yachtChatQuote(intent, trip);
+    case "wellness":
+      return wellnessChatQuote(intent, trip);
+    default:
+      return null;
+  }
+}
+
+/**
+ * Transfer / aviation: preventivo del tool flotta della villa.
+ * `quote` è la fotografia di `calculate_service_quote`, il totale non si tocca.
+ */
+function fleetChatQuote(
+  quote: FleetQuote,
+  intent: BookingIntent,
+  trip: BookingTrip,
+  aviation: boolean,
+): ChatQuote {
+  const route = intent.route;
+  const details = fleetTransferDetails({
+    from: aviation ? route.from : "",
+    to: aviation ? route.to : "",
+    time: trip.time,
+    passengers: quote.pax,
+    luggage: quote.luggage,
+    quote,
+  });
+  const rows: ChatQuoteRow[] = [];
+  if (aviation && (route.from || route.to)) {
+    rows.push({ label: "Tratta", value: `${route.from} → ${route.to}` });
+  } else if (aviation && route.km !== null) {
+    rows.push({ label: "Tratta", value: `${route.km} km` });
+  }
+  rows.push({
+    label: "Passeggeri",
+    value: `${quote.pax} · inclusi ${quote.includedPax}`,
+  });
+  rows.push({ label: "Bagagli", value: `${quote.luggage} · inclusi ${quote.includedBags}` });
+  if (trip.dateLabel) rows.push({ label: "Data", value: trip.dateLabel });
+  if (trip.time) rows.push({ label: "Orario", value: trip.time });
+
+  const luggageLine =
+    quote.luggage > 0
+      ? `, ${quote.luggage} ${quote.luggage === 1 ? "bagaglio" : "bagagli"}`
+      : "";
+  const routeLine =
+    aviation && route.from && route.to
+      ? `, tratta ${route.from} → ${route.to}`
+      : "";
+
+  return {
+    service: aviation ? "aviation" : "transfer",
+    serviceLabel: aviation
+      ? `Private Aviation — ${quote.vehicleLabel}`
+      : `Trasferimento — ${quote.vehicleLabel}`,
+    title: quote.vehicleLabel,
+    subtitle: `${quote.supplierName} · ${FLEET_CATEGORY_LABELS[quote.category]}`,
+    rows,
+    lines: quote.lines,
+    total: quote.total,
+    summary: `Ecco la proposta: ${quote.vehicleLabel} di ${quote.supplierName}, ${quote.pax} passeggeri${luggageLine}${routeLine}${tripPhrase(trip)}. ${BOOKING_CTA}`,
+    details,
+    pax: quote.pax,
+  };
+}
+
+// ── Disponibilità dei servizi di villa ──────────────────────────────────────
+
+interface OfferedService {
+  kind: "chef" | "yacht" | "wellness";
+  title: string;
+}
+
+/**
+ * I servizi di villa (non-flotta) offerti: vengono dalle stesse card del tab
+ * Services (`conciergeServices`) e dal mapping dei modal (`matchServiceCategory`).
+ * I transfer/aviation non sono qui: passano dal canale flotta.
+ */
+function offeredVillaServices(services: ConciergeService[]): OfferedService[] {
+  const offered: OfferedService[] = [];
+  for (const service of services) {
+    const match = matchServiceCategory(service);
+    if (!match || match.category === "transfer") continue;
+    if (offered.some((entry) => entry.kind === match.category)) continue;
+    offered.push({ kind: match.category, title: service.title });
+  }
+  return offered;
+}
+
+// ── Piano di risposta ───────────────────────────────────────────────────────
+
 /**
  * Il piano di risposta. Ordine delle regole:
- *   categoria assente → "non disponibile" + alternative, nessuna card
- *   veicolo mancante   → chiedi solo il veicolo, elencando le opzioni reali
- *   pax mancanti       → chiedi solo i passeggeri
- *   altrimenti         → card con il preventivo di `calculate_service_quote`
+ *   servizio/categoria assente → "non disponibile" + alternative, nessuna card
+ *   parametri mancanti         → chiedi SOLO quelli, nessuna card
+ *   altrimenti                 → card con il preventivo del calcolatore reale
  */
 export function planBookingReply(
   intent: BookingIntent,
   catalog: FleetCatalog,
+  services: ConciergeService[] = conciergeServices,
 ): BookingPlan {
-  if (!intent.isBooking) return { kind: "none" };
+  if (!intent.isBooking || !intent.service) return { kind: "none" };
+  if (intent.service === "transfer" || intent.service === "aviation") {
+    return planFleetReply(intent, catalog);
+  }
+  return planVillaServiceReply(intent, services);
+}
 
-  const category = intent.requestedCategory;
+/** Transfer e aviazione privata: canale flotta (fleet DB + fallback). */
+function planFleetReply(intent: BookingIntent, catalog: FleetCatalog): BookingPlan {
+  const aviation = intent.service === "aviation";
+  const category: FleetCategory | null = aviation
+    ? "helicopter"
+    : intent.requestedCategory;
   const inCategory = category
     ? catalog.vehicles.filter((vehicle) => vehicle.category === category)
     : [];
 
   if (category && inCategory.length === 0) {
     const alternatives = alternativeLines(catalog);
+    const noun = withArticle(FLEET_CATEGORY_LABELS[category], {
+      sentenceStart: true,
+    });
     return {
       kind: "unavailable",
-      content: `La ${FLEET_CATEGORY_LABELS[category]} non è disponibile per questa villa. Le alternative reali disponibili sono: ${alternatives.join("; ")}. Posso preparare il preventivo per una di queste.`,
+      content: `${noun} non è disponibile per questa villa. Le alternative reali disponibili sono: ${alternatives.join("; ")}. Posso preparare il preventivo per una di queste.`,
       alternatives,
     };
   }
 
-  const vehicle = intent.vehicle ?? (inCategory.length > 0 ? cheapestIn(inCategory) : null);
+  const vehicle = aviation
+    ? intent.vehicle?.category === "helicopter"
+      ? intent.vehicle
+      : inCategory.length > 0
+        ? cheapestIn(inCategory)
+        : null
+    : intent.vehicle ?? (inCategory.length > 0 ? cheapestIn(inCategory) : null);
 
   if (!vehicle) {
     return {
       kind: "clarify",
-      content: `Con piacere. Per questa villa posso predisporre: ${vehicleOptions(catalog)}. Quale veicolo preferisce?`,
+      content: askMissing(
+        ["vehicle"],
+        `Per questa villa posso predisporre: ${vehicleOptions(catalog)}.`,
+      ),
       missing: ["vehicle"],
     };
   }
 
-  if (intent.pax === null) {
-    return {
-      kind: "clarify",
-      content: `${vehicle.label} è disponibile fino a ${vehicle.maxPax} passeggeri. Quante persone viaggeranno?`,
-      missing: ["pax"],
-    };
+  // Parametri essenziali: transfer = passeggeri; aviation = tratta, data, ora, pax.
+  const missing: BookingMissing[] = [];
+  if (aviation) {
+    const hasRoute =
+      (intent.route.from !== "" && intent.route.to !== "") || intent.route.km !== null;
+    if (!hasRoute) missing.push("route");
+    if (!intent.trip.date) missing.push("date");
+    if (!intent.trip.time) missing.push("time");
+  }
+  if (intent.pax === null) missing.push("pax");
+  if (missing.length > 0) {
+    // Contesto reale (capienza del veicolo) solo quando manca il solo pax:
+    // nessun parametro inventato, solo l'informazione che aiuta a rispondere.
+    const context =
+      missing.length === 1 && missing[0] === "pax"
+        ? `${vehicle.label} è disponibile fino a ${vehicle.maxPax} passeggeri.`
+        : "";
+    return { kind: "clarify", content: askMissing(missing, context), missing };
   }
 
-  if (intent.pax > vehicle.maxPax) {
-    const fitting = catalog.vehicles.filter((other) => other.maxPax >= (intent.pax ?? 0));
+  const pax = intent.pax ?? 0;
+  if (pax > vehicle.maxPax) {
+    const fitting = catalog.vehicles.filter((other) => other.maxPax >= pax);
     if (fitting.length === 0) {
       const maxPax = catalog.vehicles.reduce(
         (max, other) => Math.max(max, other.maxPax),
@@ -496,13 +1018,13 @@ export function planBookingReply(
       );
       return {
         kind: "clarify",
-        content: `${vehicle.label} accoglie fino a ${vehicle.maxPax} passeggeri e la villa non ha veicoli per ${intent.pax} persone (massimo ${maxPax}). Posso organizzare più corse: mi dica come preferisce procedere.`,
+        content: `${vehicle.label} accoglie fino a ${vehicle.maxPax} passeggeri e la villa non ha veicoli per ${pax} persone (massimo ${maxPax}). Posso organizzare più corse: mi dica come preferisce procedere.`,
         missing: ["vehicle"],
       };
     }
     return {
       kind: "clarify",
-      content: `Per ${intent.pax} passeggeri il ${vehicle.label} non basta. Posso proporre: ${fitting
+      content: `Per ${pax} passeggeri ${vehicle.label} non basta. Posso proporre: ${fitting
         .map((other) => `${other.label} (fino a ${other.maxPax} passeggeri)`)
         .join("; ")}. Quale preferisce?`,
       missing: ["vehicle"],
@@ -511,7 +1033,11 @@ export function planBookingReply(
 
   const quote = calculate_service_quote(
     vehicle.id,
-    { pax: intent.pax, luggage: intent.luggage ?? 0 },
+    {
+      pax,
+      luggage: intent.luggage ?? 0,
+      km: intent.route.km ?? undefined,
+    },
     catalog.vehicles,
   );
   if (!quote) {
@@ -522,52 +1048,115 @@ export function planBookingReply(
     };
   }
 
-  const luggageLine =
-    quote.luggage > 0 ? `, ${quote.luggage} ${quote.luggage === 1 ? "bagaglio" : "bagagli"}` : "";
+  const chatQuote = fleetChatQuote(quote, intent, intent.trip, aviation);
   return {
     kind: "booking",
-    content: `Ecco la proposta: ${quote.vehicleLabel} di ${quote.supplierName}, ${quote.pax} passeggeri${luggageLine}. Il totale stimato è nella card qui sotto — confermi e invio la richiesta al nostro staff?`,
-    quote,
+    content: chatQuote.summary,
+    quote: chatQuote,
     trip: intent.trip,
   };
+}
+
+/** Chef, yacht, wellness: calcolatori dei modal, nessun default inventato. */
+function planVillaServiceReply(
+  intent: BookingIntent,
+  services: ConciergeService[],
+): BookingPlan {
+  const kind = intent.service as "chef" | "yacht" | "wellness";
+  const offered = offeredVillaServices(services);
+  const match = offered.find((entry) => entry.kind === kind);
+
+  if (!match) {
+    const alternatives = offered.map((entry) => entry.title);
+    const noun = withArticle(serviceNoun(kind), { sentenceStart: true });
+    const tail =
+      alternatives.length > 0
+        ? `I servizi disponibili in questa villa sono: ${alternatives.join("; ")}.`
+        : "Al momento la villa non ha altri servizi concierge attivi.";
+    return {
+      kind: "unavailable",
+      content: `${noun} non è disponibile per questa villa. ${tail}`,
+      alternatives,
+    };
+  }
+
+  const missing = missingVillaParams(intent, kind);
+  if (missing.length > 0) {
+    return { kind: "clarify", content: askMissing(missing), missing };
+  }
+
+  const quote = villaServiceQuote(intent, intent.trip);
+  if (!quote) {
+    return {
+      kind: "clarify",
+      content: askMissing(missingVillaParams(intent, kind)),
+      missing: missingVillaParams(intent, kind),
+    };
+  }
+
+  return { kind: "booking", content: quote.summary, quote, trip: intent.trip };
+}
+
+/** Nome italiano del servizio, con il genere giusto per l'articolo. */
+function serviceNoun(kind: "chef" | "yacht" | "wellness"): string {
+  switch (kind) {
+    case "chef":
+      return "servizio chef di villa";
+    case "yacht":
+      return "charter in barca";
+    case "wellness":
+      return "wellness";
+  }
+}
+
+/** I parametri essenziali che mancano (allineati ai campi dei modal). */
+function missingVillaParams(
+  intent: BookingIntent,
+  kind: "chef" | "yacht" | "wellness",
+): BookingMissing[] {
+  const missing: BookingMissing[] = [];
+  if (kind === "chef") {
+    if (!intent.meal) missing.push("meal");
+    if (intent.guests === null) missing.push("guests");
+  }
+  if (kind === "yacht") {
+    if (!intent.trip.date) missing.push("date");
+    if (!intent.duration) missing.push("duration");
+  }
+  if (kind === "wellness" && !intent.treatmentId) missing.push("treatment");
+  return missing;
 }
 
 // ── Payload dell'INSERT ─────────────────────────────────────────────────────
 
 /**
- * I campi della richiesta creata dalla chat. `details` passa da
- * `fleetTransferDetails` (la stessa funzione del modal Trasferimenti) e porta
- * in più `channel: "chat"` + la data richiesta, così staff e "I Miei Servizi"
- * leggono la richiesta senza logica nuova.
+ * I campi della richiesta creata dalla chat. `details` porta la forma esatta del
+ * modal del servizio (serviceDetails.ts) più `channel: "chat"` e la data
+ * richiesta, così staff e "I Miei Servizi" leggono la richiesta senza logica
+ * nuova. Prezzo e commissioni (12% / 3%) vengono dal preventivo del tool.
  */
 export function buildChatBookingPayload(
-  quote: FleetQuote,
+  quote: ChatQuote,
   trip: BookingTrip,
 ): ChatBookingPayload {
-  const details = fleetTransferDetails({
-    from: "",
-    to: "",
-    time: trip.time,
-    passengers: quote.pax,
-    luggage: quote.luggage,
-    quote,
-  });
-  const mode = quote.category === "helicopter" ? "helicopter" : "transfer";
+  const details: ChatBookingDetails = {
+    ...quote.details,
+    channel: "chat",
+    date: trip.date,
+    dateLabel: trip.dateLabel,
+    ...(quote.pax !== undefined ? { pax: quote.pax } : {}),
+  };
   return {
-    serviceLabel: `${mode === "helicopter" ? "Elicottero" : "Trasferimento"} — ${quote.vehicleLabel}`,
+    serviceLabel: quote.serviceLabel,
     price: quote.total,
-    agencyCommission: round2((quote.total * revenueConfig.agencyCommissionPct) / 100),
+    agencyCommission: round2(
+      (quote.total * revenueConfig.agencyCommissionPct) / 100,
+    ),
     platformCommission: round2(
       (quote.total * revenueConfig.platformCommissionPct) / 100,
     ),
     agencyPct: revenueConfig.agencyCommissionPct,
     auraPct: revenueConfig.auraFeePct,
-    details: {
-      ...details,
-      channel: "chat",
-      pax: quote.pax,
-      date: trip.date,
-      dateLabel: trip.dateLabel,
-    },
+    details,
   };
 }
