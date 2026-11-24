@@ -29,8 +29,10 @@ import {
   buildChatBookingPayload,
   parseBookingIntent,
   planBookingReply,
+  type ChatBookingDetails,
 } from "../src/lib/chatAgent";
 import { italianArticle, withArticle } from "../src/lib/grammar";
+import { formatEUR } from "../src/lib/format";
 
 // ── Fixture: una villa con un van (Classe V), un SUV e un elicottero ────────
 
@@ -387,7 +389,8 @@ eq("(d) details.vehicleQuote è il preventivo del tool", transferDetails.vehicle
 // Chef: details nella forma del modal + channel/date + 12/3.
 if (chefPlan.kind === "booking") {
   const chefPayload = buildChatBookingPayload(chefPlan.quote, chefPlan.trip);
-  const chefDetailsOut = chefPayload.details as ChefDetails & { channel: string; date: string };
+  const chefDetailsOut = chefPayload.details as ChefDetails &
+    ChatBookingDetails;
   eq("(d) chef: price = totale del calcolatore", chefPayload.price, 720);
   eq("(d) chef: agency_commission 12%", chefPayload.agencyCommission, 86.4);
   eq("(d) chef: platform_commission 3%", chefPayload.platformCommission, 21.6);
@@ -397,29 +400,42 @@ if (chefPlan.kind === "booking") {
   eq("(d) chef: details.pricePerGuest", chefDetailsOut.pricePerGuest, 120);
   eq("(d) chef: details.channel", chefDetailsOut.channel, "chat");
   eq("(d) chef: details.date", chefDetailsOut.date, "2026-07-18");
+  eq("(d) chef: details.dateLabel", chefDetailsOut.dateLabel, "domani");
+  eq("(d) chef: details.lines = righe del preventivo", chefDetailsOut.lines?.length, 1);
+  eq("(d) chef: linea del preventivo", chefDetailsOut.lines?.[0]?.label, "Cena × 6 ospiti");
+  eq("(d) chef: importo della linea", chefDetailsOut.lines?.[0]?.amount, 720);
 }
 
 // Yacht: details nella forma del modal.
 if (yachtPlan.kind === "booking") {
   const yachtPayload = buildChatBookingPayload(yachtPlan.quote, yachtPlan.trip);
-  const yachtDetailsOut = yachtPayload.details as YachtDetails & { channel: string };
+  const yachtDetailsOut = yachtPayload.details as YachtDetails & ChatBookingDetails;
   eq("(d) yacht: details.category", yachtDetailsOut.category, "yacht");
   eq("(d) yacht: details.duration", yachtDetailsOut.duration, "full-day");
   eq("(d) yacht: details.durationLabel", yachtDetailsOut.durationLabel, "Giornata Intera");
   eq("(d) yacht: details.total", yachtDetailsOut.total, 2400);
   eq("(d) yacht: details.channel", yachtDetailsOut.channel, "chat");
   eq("(d) yacht: price", yachtPayload.price, 2400);
+  eq("(d) yacht: details.date", yachtDetailsOut.date, "2026-07-18");
+  eq("(d) yacht: details.dateLabel", yachtDetailsOut.dateLabel, "domani");
+  eq("(d) yacht: details.lines = righe del preventivo", yachtDetailsOut.lines?.length, 1);
+  eq("(d) yacht: linea del preventivo", yachtDetailsOut.lines?.[0]?.label, "Giornata Intera");
+  eq("(d) yacht: importo della linea", yachtDetailsOut.lines?.[0]?.amount, 2400);
 }
 
 // Wellness: details nella forma del modal.
 if (wellnessPlan.kind === "booking") {
   const wellnessPayload = buildChatBookingPayload(wellnessPlan.quote, wellnessPlan.trip);
-  const wellnessDetailsOut = wellnessPayload.details as WellnessDetails & { channel: string };
+  const wellnessDetailsOut = wellnessPayload.details as WellnessDetails &
+    ChatBookingDetails;
   eq("(d) wellness: details.category", wellnessDetailsOut.category, "wellness");
   eq("(d) wellness: details.treatmentId", wellnessDetailsOut.treatmentId, "massage-relax");
   eq("(d) wellness: details.price", wellnessDetailsOut.price, 110);
   eq("(d) wellness: details.channel", wellnessDetailsOut.channel, "chat");
   eq("(d) wellness: price", wellnessPayload.price, 110);
+  eq("(d) wellness: details.lines = righe del preventivo", wellnessDetailsOut.lines?.length, 1);
+  eq("(d) wellness: linea del preventivo", wellnessDetailsOut.lines?.[0]?.label, "Massaggio relax");
+  eq("(d) wellness: importo della linea", wellnessDetailsOut.lines?.[0]?.amount, 110);
 }
 
 // Aviation: details del transfer (modalità elicottero) + tratta.
@@ -435,6 +451,61 @@ if (aviationPlan.kind === "booking") {
   eq("(d) aviation: details.channel", aviationDetails.channel, "chat");
   eq("(d) aviation: price", aviationPayload.price, 2040);
 }
+
+// ── (h) Orario e voci del preventivo persistiti per i servizi di villa ──
+// Lo staff deve vedere orario e preventivo di chef/yacht/wellness senza
+// ricalcolarli: qui si verifica che finiscano davvero nel JSONB `details`.
+
+const chefTimedPlan = plan("Vorrei uno chef per cena per 6 ospiti domani alle 20:30");
+eq("(h) chef con orario → booking", chefTimedPlan.kind, "booking");
+if (chefTimedPlan.kind === "booking") {
+  eq("(h) chef: orario letto dall'intent", chefTimedPlan.trip.time, "20:30");
+  const chefTimedPayload = buildChatBookingPayload(chefTimedPlan.quote, chefTimedPlan.trip);
+  const chefTimedDetails = chefTimedPayload.details as ChefDetails & ChatBookingDetails;
+  eq("(h) chef: details.time salvato", chefTimedDetails.time, "20:30");
+  eq("(h) chef: details.date", chefTimedDetails.date, "2026-07-18");
+  eq("(h) chef: details.dateLabel", chefTimedDetails.dateLabel, "domani");
+  eq("(h) chef: lines è una riga", chefTimedDetails.lines?.length, 1);
+  eq("(h) chef: lines[0].label", chefTimedDetails.lines?.[0]?.label, "Cena × 6 ospiti");
+  eq("(h) chef: lines[0].amount = totale", chefTimedDetails.lines?.[0]?.amount, 720);
+  eq("(h) chef: lines sommano al prezzo", chefTimedDetails.lines?.[0]?.amount, chefTimedPayload.price);
+}
+
+const yachtTimedPlan = plan(
+  "Vorrei noleggiare uno yacht per una giornata intera domani alle 10:00",
+);
+eq("(h) yacht con orario → booking", yachtTimedPlan.kind, "booking");
+if (yachtTimedPlan.kind === "booking") {
+  const yachtTimedPayload = buildChatBookingPayload(yachtTimedPlan.quote, yachtTimedPlan.trip);
+  const yachtTimedDetails = yachtTimedPayload.details as YachtDetails & ChatBookingDetails;
+  eq("(h) yacht: details.time salvato", yachtTimedDetails.time, "10:00");
+  eq("(h) yacht: details.departureTime invariato", yachtTimedDetails.departureTime, "10:00");
+  eq("(h) yacht: details.dateLabel", yachtTimedDetails.dateLabel, "domani");
+  eq("(h) yacht: lines[0].amount = totale", yachtTimedDetails.lines?.[0]?.amount, 2400);
+  eq("(h) yacht: lines sommano al prezzo", yachtTimedDetails.lines?.[0]?.amount, yachtTimedPayload.price);
+}
+
+const wellnessTimedPlan = plan("Vorrei un massaggio relax domani alle 15:00");
+eq("(h) wellness con orario → booking", wellnessTimedPlan.kind, "booking");
+if (wellnessTimedPlan.kind === "booking") {
+  const wellnessTimedPayload = buildChatBookingPayload(
+    wellnessTimedPlan.quote,
+    wellnessTimedPlan.trip,
+  );
+  const wellnessTimedDetails = wellnessTimedPayload.details as WellnessDetails &
+    ChatBookingDetails;
+  eq("(h) wellness: details.time salvato", wellnessTimedDetails.time, "15:00");
+  eq("(h) wellness: details.dateLabel", wellnessTimedDetails.dateLabel, "domani");
+  eq("(h) wellness: lines[0].label", wellnessTimedDetails.lines?.[0]?.label, "Massaggio relax");
+  eq("(h) wellness: lines[0].amount = totale", wellnessTimedDetails.lines?.[0]?.amount, 110);
+  eq("(h) wellness: lines sommano al prezzo", wellnessTimedDetails.lines?.[0]?.amount, wellnessTimedPayload.price);
+}
+
+// ── (i) Importi: separatore delle migliaia in stile italiano ──
+
+eq("(i) formatEUR(2400)", formatEUR(2400), "2.400,00");
+eq("(i) formatEUR(480)", formatEUR(480), "480,00");
+eq("(i) formatEUR(1500.5)", formatEUR(1500.5), "1.500,50");
 
 // ── (g) Grammatica: una sola funzione, nessuna concatenazione sbagliata ───
 

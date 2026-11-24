@@ -26,6 +26,7 @@ import {
   type ServiceDetails,
 } from "../data/serviceDetails";
 import { ServiceDetailsPanel, ServiceRequestModal } from "../components/service-modals";
+import { formatEUR } from "../lib/format";
 import {
   archiveRequestsForVilla,
   closeSessionsForVilla,
@@ -3221,10 +3222,8 @@ const REQUEST_FILTERS: RequestFilter[] = ["all", ...GUEST_REQUEST_STATUSES];
 
 function formatRequestAmount(value: number | null): string {
   if (value === null) return "—";
-  return `€ ${value.toLocaleString("en-GB", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+  // Formato italiano con separatore delle migliaia: "€ 2.400,00".
+  return `€ ${formatEUR(value)}`;
 }
 function formatRequestStamp(iso: string): string {
   const date = new Date(iso);
@@ -4643,7 +4642,7 @@ interface RevenueStat {
 }
 
 function formatCurrency(value: number): string {
-  return `€${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `€ ${formatEUR(value)}`;
 }
 
 function RevenuePanel({
