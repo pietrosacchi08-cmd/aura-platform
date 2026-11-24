@@ -14,6 +14,7 @@
  * below only packages that quote for storage.
  */
 import { servicePricing, round2 } from "./config";
+import { formatEuro } from "../lib/format";
 import {
   FLEET_CATEGORY_LABELS,
   type FleetCategory,
@@ -28,6 +29,16 @@ export type YachtDuration = "half-day" | "full-day";
 export type ChefMeal = "breakfast" | "lunch" | "dinner";
 export type TransferMode = "transfer" | "helicopter";
 
+/**
+ * Una voce del preventivo salvata con la richiesta (stessa forma della card:
+ * etichetta + importo). Opzionale: le richieste registrate prima di questo
+ * campo restano valide e si leggono come prima.
+ */
+export interface DetailLine {
+  label: string;
+  amount: number;
+}
+
 /** Boat charter / private yacht. */
 export interface YachtDetails {
   category: "yacht";
@@ -37,6 +48,13 @@ export interface YachtDetails {
   durationLabel: string;
   /** Departure time, HH:MM (24h). */
   departureTime: string;
+  /**
+   * Orario richiesto in chat, HH:MM ("" quando non indicato). Aggiunto dopo
+   * `departureTime`: le righe già in DB possono non averlo.
+   */
+  time?: string;
+  /** Righe del preventivo mostrate nella card al momento dell'invio. */
+  lines?: DetailLine[];
   skipper: boolean;
   fuel: boolean;
   /** Config values used at submit time, so a recorded request is auditable. */
@@ -53,6 +71,10 @@ export interface ChefDetails {
   guests: number;
   /** Free text: allergies / intolerances. */
   dietary: string;
+  /** Orario richiesto in chat, HH:MM ("" quando non indicato). */
+  time?: string;
+  /** Righe del preventivo mostrate nella card al momento dell'invio. */
+  lines?: DetailLine[];
   pricePerGuest: number;
   total: number;
 }
@@ -101,6 +123,8 @@ export interface WellnessDetails {
   date: string;
   /** Preferred time, HH:MM. */
   time: string;
+  /** Righe del preventivo mostrate nella card al momento dell'invio. */
+  lines?: DetailLine[];
   price: number;
   total: number;
 }
@@ -137,15 +161,12 @@ export const ESTIMATE_DISCLAIMER = "Stima — confermata dallo staff";
 
 // ── Currency formatting ─────────────────────────────────────────────────────
 
-const euroFormatter = new Intl.NumberFormat("it-IT", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-/** "€ 1.400,00" — the Italian money format used by the modals and staff views. */
+/**
+ * "€ 1.400,00" — the Italian money format used by the modals and staff views.
+ * Il formato numerico (migliaia comprese) è in src/lib/format.ts.
+ */
 export function formatEuroIt(amount: number): string {
-  if (!Number.isFinite(amount)) return "—";
-  return `€ ${euroFormatter.format(amount)}`;
+  return formatEuro(amount);
 }
 
 // ── Service catalogue → modal category ──────────────────────────────────────
@@ -446,6 +467,25 @@ export function parseServiceDetails(raw: unknown): ServiceDetails | null {
   const s = (value: unknown, fallback = ""): string =>
     typeof value === "string" ? value : fallback;
   const b = (value: unknown): boolean => value === true;
+  /**
+   * Voci del preventivo salvate con la richiesta: righe `{label, amount}`.
+   * Una riga malformata viene scartata; nessuna riga valida = campo assente.
+   */
+  const lines = (value: unknown): DetailLine[] | undefined => {
+    if (!Array.isArray(value)) return undefined;
+    const parsed = value
+      .map((entry) => {
+        const line = (entry ?? {}) as Record<string, unknown>;
+        const label = typeof line.label === "string" ? line.label : "";
+        const amount = line.amount;
+        if (!label || typeof amount !== "number" || !Number.isFinite(amount)) {
+          return null;
+        }
+        return { label, amount };
+      })
+      .filter((line): line is DetailLine => line !== null);
+    return parsed.length > 0 ? parsed : undefined;
+  };
 
   if (category === "yacht") {
     const duration: YachtDuration = row.duration === "full-day" ? "full-day" : "half-day";
@@ -455,6 +495,8 @@ export function parseServiceDetails(raw: unknown): ServiceDetails | null {
       duration,
       durationLabel: s(row.durationLabel, YACHT_DURATION_LABELS[duration]),
       departureTime: s(row.departureTime),
+      time: s(row.time),
+      lines: lines(row.lines),
       skipper: b(row.skipper),
       fuel: b(row.fuel),
       prices: {
@@ -474,6 +516,8 @@ export function parseServiceDetails(raw: unknown): ServiceDetails | null {
       mealLabel: s(row.mealLabel, CHEF_MEAL_LABELS[meal]),
       guests: n(row.guests),
       dietary: s(row.dietary),
+      time: s(row.time),
+      lines: lines(row.lines),
       pricePerGuest: n(row.pricePerGuest),
       total: n(row.total),
     };
@@ -501,6 +545,7 @@ export function parseServiceDetails(raw: unknown): ServiceDetails | null {
       treatmentLabel: s(row.treatmentLabel),
       date: s(row.date),
       time: s(row.time),
+      lines: lines(row.lines),
       price: n(row.price),
       total: n(row.total),
     };
@@ -526,6 +571,21 @@ const yesNo = (value: boolean): string => (value ? "Incluso" : "Non incluso");
 const orDash = (value: string): string => (value.trim() ? value : "—");
 
 /**
+ * Le voci del preventivo salvate con la richiesta, in una sola riga leggibile
+ * dallo staff ("Giornata Intera € 2.400,00 · Skipper incluso € 450,00").
+ * Le richieste registrate prima di questo campo non producono alcuna riga.
+ */
+function quoteLineRows(lines: DetailLine[] | undefined): DetailRow[] {
+  if (!lines || lines.length === 0) return [];
+  return [
+    {
+      label: "Voci preventivo",
+      value: lines.map((line) => `${line.label} ${formatEuro(line.amount)}`).join(" · "),
+    },
+  ];
+}
+
+/**
  * The guest's choices, labelled in Italian, for the staff "Dettagli richiesta"
  * panel. Empty values render as "—" so a row never looks half-filled.
  */
@@ -535,7 +595,11 @@ export function formatServiceDetails(details: ServiceDetails | null): DetailRow[
     case "yacht":
       return [
         { label: "Durata", value: details.durationLabel },
-        { label: "Orario di partenza", value: orDash(details.departureTime) },
+        {
+          label: "Orario di partenza",
+          value: orDash(details.departureTime || details.time || ""),
+        },
+        ...quoteLineRows(details.lines),
         { label: "Skipper", value: yesNo(details.skipper) },
         { label: "Carburante", value: yesNo(details.fuel) },
       ];
@@ -543,6 +607,8 @@ export function formatServiceDetails(details: ServiceDetails | null): DetailRow[
       return [
         { label: "Pasto", value: details.mealLabel },
         { label: "Numero di ospiti", value: String(details.guests) },
+        ...(details.time ? [{ label: "Orario", value: details.time }] : []),
+        ...quoteLineRows(details.lines),
         {
           label: "Preferenze alimentari",
           value: orDash(details.dietary),
@@ -584,6 +650,7 @@ export function formatServiceDetails(details: ServiceDetails | null): DetailRow[
         { label: "Trattamento", value: orDash(details.treatmentLabel) },
         { label: "Data", value: orDash(formatIsoDate(details.date)) },
         { label: "Orario", value: orDash(details.time) },
+        ...quoteLineRows(details.lines),
       ];
     default:
       return [];

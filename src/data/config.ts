@@ -13,7 +13,7 @@ export const agencyConfig = {
 };
 
 /** Subscription price surfaced to the agency in the revenue panel. */
-export const subscriptionPrice = "€2,000.00/yr";
+export const subscriptionPrice = "€ 2.000,00/anno";
 // ── Access gate (front-end mock auth, consistent with the demo nature) ───────
 /** Stay PIN handed to the guest at check-in (demo default). */
 export const guestAccess = { stayPin: "0000" };

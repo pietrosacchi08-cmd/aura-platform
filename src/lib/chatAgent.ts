@@ -1139,11 +1139,24 @@ export function buildChatBookingPayload(
   quote: ChatQuote,
   trip: BookingTrip,
 ): ChatBookingPayload {
+  // Servizi di villa: orario e voci del preventivo si salvano con la richiesta,
+  // così lo staff li legge nel JSONB `details` senza ricalcolarli.
+  const villaService =
+    quote.service === "chef" ||
+    quote.service === "yacht" ||
+    quote.service === "wellness";
   const details: ChatBookingDetails = {
     ...quote.details,
     channel: "chat",
     date: trip.date,
     dateLabel: trip.dateLabel,
+    ...(villaService
+      ? {
+          // "" quando l'ospite non ha indicato un orario (stessa convenzione di `date`).
+          time: trip.time,
+          lines: quote.lines.map((line) => ({ label: line.label, amount: line.amount })),
+        }
+      : {}),
     ...(quote.pax !== undefined ? { pax: quote.pax } : {}),
   };
   return {
